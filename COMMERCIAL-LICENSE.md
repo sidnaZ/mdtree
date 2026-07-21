@@ -34,4 +34,4 @@ You **do** need one if you want to:
 Copyright (c) 2026 MDTree contributors.
 
 For commercial licensing terms, pricing, or questions, please
-[contact the maintainers](zandis@dsistemas.lv).
+[contact the maintainers](mailto:zandis@dsistemas.lv).
