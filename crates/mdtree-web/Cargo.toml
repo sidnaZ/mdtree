@@ -1,0 +1,32 @@
+[package]
+name = "mdtree-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Local web tree viewer and editor adapter for MDTree"
+
+[dependencies]
+ammonia.workspace = true
+anyhow.workspace = true
+axum = { workspace = true, features = ["ws"] }
+mdtree-core.workspace = true
+mdtree-markdown.workspace = true
+mdtree-sqlite.workspace = true
+pulldown-cmark.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net", "io-util", "time"] }
+tracing.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

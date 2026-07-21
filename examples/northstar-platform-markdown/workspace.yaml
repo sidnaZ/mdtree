@@ -1,0 +1,53 @@
+format: mdtree-snapshot
+format_version: 1
+workspace:
+  name: Northstar Platform
+  workspace_format_version: 1
+revision_policy: head_only
+revisions: []
+references:
+- source_node_id: 01JZ8Q5CWPN8T7KPN5A1V9B6XW
+  source_section_id: null
+  reference_type: implements
+  target:
+    status: resolved
+    node_id: 01JZ8Q5CWPN8T7KPN5A1V9B6XR
+    target_ref: ADR-002 — Domain Events via Kafka
+    anchor: null
+  origin: explicit
+- source_node_id: 01JZ8Q5CWPN8T7KPN5A1V9B6XX
+  source_section_id: null
+  reference_type: implements
+  target:
+    status: resolved
+    node_id: 01JZ8Q5CWPN8T7KPN5A1V9B6XQ
+    target_ref: ADR-001 — PostgreSQL as System of Record
+    anchor: null
+  origin: explicit
+- source_node_id: 01JZ8Q5CWPN8T7KPN5A1V9B6XX
+  source_section_id: null
+  reference_type: implements
+  target:
+    status: resolved
+    node_id: 01JZ8Q5CWPN8T7KPN5A1V9B6XR
+    target_ref: ADR-002 — Domain Events via Kafka
+    anchor: null
+  origin: explicit
+- source_node_id: 01JZ8Q5CWPN8T7KPN5A1V9B6XY
+  source_section_id: null
+  reference_type: implements
+  target:
+    status: resolved
+    node_id: 01JZ8Q5CWPN8T7KPN5A1V9B6XR
+    target_ref: ADR-002 — Domain Events via Kafka
+    anchor: null
+  origin: explicit
+- source_node_id: 01JZ8Q5CWPN8T7KPN5A1V9B6XS
+  source_section_id: null
+  reference_type: applies_to
+  target:
+    status: resolved
+    node_id: 01JZ8Q5CWPN8T7KPN5A1V9B6XT
+    target_ref: Services
+    anchor: null
+  origin: explicit

@@ -1,0 +1,80 @@
+---
+id: 01JZ8Q5CWPN8T7KPN5A1V9B6XT
+parent_id: 01JZ8Q5CWPN8T7KPN5A1V9B6XM
+slug: services
+sibling_order: 1
+version: 1
+content_hash:
+- 126
+- 36
+- 27
+- 150
+- 185
+- 85
+- 237
+- 99
+- 244
+- 144
+- 217
+- 243
+- 245
+- 0
+- 49
+- 252
+- 75
+- 41
+- 29
+- 132
+- 84
+- 109
+- 133
+- 14
+- 251
+- 55
+- 166
+- 50
+- 119
+- 17
+- 31
+- 135
+revision_hash:
+- 118
+- 43
+- 26
+- 132
+- 240
+- 88
+- 33
+- 170
+- 248
+- 79
+- 205
+- 213
+- 78
+- 28
+- 228
+- 190
+- 155
+- 242
+- 203
+- 73
+- 173
+- 166
+- 105
+- 122
+- 255
+- 251
+- 215
+- 98
+- 194
+- 115
+- 207
+- 81
+created_at: 1
+updated_at: 1
+metadata:
+  title: Services
+  node_type: area
+---
+# Services
+Responsibilities, interfaces, dependencies, and runbooks.

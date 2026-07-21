@@ -1,0 +1,13 @@
+{
+  "name": "mdtree-web-assets",
+  "private": true,
+  "description": "Tailwind CSS build for the mdtree browse-ui frontend. Not part of the Rust build; regenerate assets/style.css manually after editing assets/tailwind.input.css, assets/index.html, or assets/app.js.",
+  "scripts": {
+    "build": "tailwindcss -i assets/tailwind.input.css -o assets/style.css --minify"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.3",
+    "@tailwindcss/typography": "^0.5.19",
+    "tailwindcss": "^4.3.3"
+  }
+}

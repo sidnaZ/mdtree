@@ -1,0 +1,22 @@
+[package]
+name = "mdtree-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Domain model and application services for MDTree"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+blake3.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+ulid.workspace = true
+unicode-normalization.workspace = true
+
+[lints]
+workspace = true

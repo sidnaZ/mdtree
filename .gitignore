@@ -1,0 +1,7 @@
+/target/
+/dist/
+.local-todo.mdtree
+*.mdtree-shm
+*.mdtree-wal
+.claude
+local/

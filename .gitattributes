@@ -1,0 +1,8 @@
+# Normalize all text files to LF checkouts on every platform.
+# Windows Git defaults to core.autocrlf=true, which rewrites LF blobs to
+# CRLF on checkout. README.md is embedded verbatim via include_str! into
+# the mdtree-project snapshot fixture and compared against the LF content
+# baked into the committed example .mdtree databases, so a CRLF checkout
+# on windows-latest breaks that equality check. Forcing eol=lf keeps every
+# platform's checkout byte-identical to the LF blobs stored in git.
+* text=auto eol=lf

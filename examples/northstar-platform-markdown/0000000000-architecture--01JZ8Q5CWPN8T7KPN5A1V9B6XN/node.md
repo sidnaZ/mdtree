@@ -1,0 +1,80 @@
+---
+id: 01JZ8Q5CWPN8T7KPN5A1V9B6XN
+parent_id: 01JZ8Q5CWPN8T7KPN5A1V9B6XM
+slug: architecture
+sibling_order: 0
+version: 1
+content_hash:
+- 24
+- 94
+- 106
+- 163
+- 232
+- 167
+- 214
+- 11
+- 27
+- 67
+- 77
+- 202
+- 21
+- 47
+- 132
+- 55
+- 99
+- 16
+- 74
+- 40
+- 21
+- 254
+- 106
+- 124
+- 144
+- 78
+- 125
+- 120
+- 212
+- 36
+- 230
+- 142
+revision_hash:
+- 217
+- 234
+- 213
+- 113
+- 234
+- 132
+- 29
+- 92
+- 160
+- 210
+- 238
+- 140
+- 190
+- 250
+- 163
+- 177
+- 114
+- 109
+- 64
+- 170
+- 26
+- 211
+- 248
+- 9
+- 170
+- 79
+- 60
+- 249
+- 30
+- 129
+- 215
+- 234
+created_at: 1
+updated_at: 1
+metadata:
+  title: Architecture
+  node_type: area
+---
+# Architecture
+System-wide design, constraints, and decisions.

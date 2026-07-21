@@ -1,0 +1,24 @@
+[package]
+name = "mdtree-markdown"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Markdown parsing and snapshot support for MDTree"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mdtree-core.workspace = true
+pulldown-cmark.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+unicode-normalization.workspace = true
+
+[lints]
+workspace = true
