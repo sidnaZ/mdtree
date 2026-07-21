@@ -1,7 +1,7 @@
 # MDTree
 
-MDTree is a local-first tool for structured tree data. Humans explore it
-visually, AI agents work with it through MCP, and computer systems integrate
+MDTree is a local-first knowledge base for structured tree data. Humans explore
+it visually, AI agents work with it through MCP, and computer systems integrate
 with it through the CLI or an API—all against the same portable `.mdtree`
 workspace.
 
@@ -17,20 +17,20 @@ cd mdtree-ui
 cargo build --release --locked
 ```
 
-Install the CLI and MCP server:
+Install the CLI and MCP server, then add Cargo's binary directory to `PATH`:
 
 ```bash
 cargo install --locked --path crates/mdtree-cli
 cargo install --locked --path crates/mdtree-mcp
+export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
-Register the MCP server with Codex and Claude Code, replacing
-`/path/to/workspaces` with the directory that contains the workspaces agents
-may access:
+Register the MCP server with Codex and Claude Code. The default workspace is
+`.mdtree` in the current directory:
 
 ```bash
-codex mcp add mdtree -- mdtree-mcp --allow-write --allow-workspace-switch --workspace-root /path/to/workspaces
-claude mcp add --transport stdio --scope user mdtree -- mdtree-mcp --allow-write --allow-workspace-switch --workspace-root /path/to/workspaces
+codex mcp add mdtree -- mdtree-mcp --allow-write --allow-workspace-switch --workspace-root .
+claude mcp add --transport stdio --scope user mdtree -- mdtree-mcp --allow-write --allow-workspace-switch --workspace-root .
 ```
 
 ## License and contact
