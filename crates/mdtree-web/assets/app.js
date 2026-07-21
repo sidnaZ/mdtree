@@ -3427,6 +3427,12 @@ document.addEventListener("keydown", (event) => {
   if (focused instanceof HTMLElement && (focused.tagName === "INPUT" || focused.tagName === "TEXTAREA" || focused.isContentEditable)) {
     return;
   }
+  // Preserve standard browser shortcuts such as copy, paste, find, and
+  // reload. Without this guard, Ctrl/Cmd+C is mistaken for the app's bare C
+  // shortcut below and preventDefault() suppresses copying selected Markdown.
+  if (event.ctrlKey || event.metaKey) {
+    return;
+  }
   if (event.key === "Escape") {
     if (!document.getElementById("delete-confirm-overlay").hidden) {
       hideDeleteConfirm();

@@ -59,6 +59,7 @@ mod tests {
     #[test]
     fn keyboard_shortcuts_toggle_markdown_and_copy_the_canonical_path_with_feedback() {
         assert!(APP_JS.contains("event.key === \"v\" || event.key === \"V\""));
+        assert!(APP_JS.contains("if (event.ctrlKey || event.metaKey)"));
         assert!(APP_JS.contains("copySelectedPath().catch(reportError)"));
         assert!(APP_JS.contains("summaryForNode(selectedId)?.path"));
         assert!(APP_JS.contains("flashCopiedNode(selectedId)"));
