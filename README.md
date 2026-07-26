@@ -13,7 +13,7 @@ MDTree requires Rust 1.88 or newer.
 
 ```bash
 git clone https://github.com/sidnaZ/mdtree.git
-cd mdtree-ui
+cd mdtree
 cargo build --release --locked
 ```
 
