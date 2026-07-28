@@ -1,0 +1,41 @@
+[
+  {
+    "name": "overlap_promotes_cross-channel_candidate",
+    "lexical": [
+      "01JZ8Q5CWPN8T7KPN5A1V9B6XM",
+      "01JZ8Q5CWPN8T7KPN5A1V9B6XN",
+      "01JZ8Q5CWPN8T7KPN5A1V9B6XP"
+    ],
+    "semantic": [
+      "01JZ8Q5CWPN8T7KPN5A1V9B6XN",
+      "01JZ8Q5CWPN8T7KPN5A1V9B6XP",
+      "01JZ8Q5CWPN8T7KPN5A1V9B6XM"
+    ],
+    "expected": [
+      "01JZ8Q5CWPN8T7KPN5A1V9B6XN",
+      "01JZ8Q5CWPN8T7KPN5A1V9B6XM",
+      "01JZ8Q5CWPN8T7KPN5A1V9B6XP"
+    ]
+  },
+  {
+    "name": "lexical_only_preserves_rank",
+    "lexical": [
+      "01JZ8Q5CWPN8T7KPN5A1V9B6XM",
+      "01JZ8Q5CWPN8T7KPN5A1V9B6XN"
+    ],
+    "semantic": [],
+    "expected": [
+      "01JZ8Q5CWPN8T7KPN5A1V9B6XM",
+      "01JZ8Q5CWPN8T7KPN5A1V9B6XN"
+    ]
+  },
+  {
+    "name": "stable_cross_channel_tie_uses_node_identity",
+    "lexical": ["01JZ8Q5CWPN8T7KPN5A1V9B6XM"],
+    "semantic": ["01JZ8Q5CWPN8T7KPN5A1V9B6XN"],
+    "expected": [
+      "01JZ8Q5CWPN8T7KPN5A1V9B6XM",
+      "01JZ8Q5CWPN8T7KPN5A1V9B6XN"
+    ]
+  }
+]

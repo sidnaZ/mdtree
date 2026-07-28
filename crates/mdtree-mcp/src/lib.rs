@@ -9,9 +9,13 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use mdtree_core::{
-    BatchChildrenRequest, NodeId, NodeSelector, NodeType, PageCursor, PageLimit, PaginationError,
-    ReferenceType, SearchFilters, SearchRequest, SearchScope, SystemUlidGenerator,
-    DEFAULT_PAGE_LIMIT,
+    BatchChildrenRequest, EmbeddingProfile, NodeId, NodeSelector, NodeType, PageCursor, PageLimit,
+    PaginationError, ReferenceType, SearchFilters, SearchMode, SearchRequest, SearchScope,
+    SemanticError, SemanticErrorCode, SystemUlidGenerator, DEFAULT_PAGE_LIMIT,
+};
+use mdtree_semantic::{
+    search_hybrid, search_semantic, HybridFallbackPolicy, HybridSearchOptions, OllamaConfig,
+    OllamaProvider, SemanticSearchError,
 };
 use mdtree_sqlite::{export_snapshot, workspace_status, SqliteStore};
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -27,6 +31,7 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler
 use serde::{Deserialize, Serialize};
 
 mod mutation;
+mod semantic;
 mod switching;
 
 pub use mutation::{
@@ -35,9 +40,18 @@ pub use mutation::{
 };
 pub use switching::{SwitchWorkspaceParams, WorkspaceSwitchPolicy};
 
+/// Runtime-only local embedding configuration for MCP semantic operations.
+#[derive(Clone, Debug, Default)]
+pub struct McpSemanticConfig {
+    /// Ollama endpoint and request deadline.
+    pub ollama: OllamaConfig,
+    /// Optional expected model; an active index may supply it when omitted.
+    pub model: Option<String>,
+}
+
 const MAX_ITEMS: u32 = 100;
 const MAX_BYTES: usize = 1_048_576;
-const MCP_INSTRUCTIONS: &str = "Use only tool names and schemas exposed by this server. Preserve the complete client-exposed function name: if tools are namespaced, invoke them through that namespace; never emit a bare name such as children or subtree. Never invent, concatenate, or infer tool names. For existing workspaces, call workspace_status first and verify its path. If that path does not match the requested workspace, call switch_workspace when exposed, then verify workspace_status again; use the CLI only when switching is unavailable or rejected. To list all nodes, pass its root_id as subtree's selector and follow every next_cursor until complete; use children for direct children and likewise follow pagination. The mdtree://tree and mdtree://references resources intentionally serialize complete whole-workspace collections and may be large; use bounded tools for targeted reads. For an uninitialized workspace, use initialize_workspace only when exposed and follow its schema. Do not claim a tool unavailable unless a real call returns that error. Never use the MDTree CLI when an equivalent MCP tool is exposed. ";
+const MCP_INSTRUCTIONS: &str = "Use only tool names and schemas exposed by this server. Preserve the complete client-exposed function name: if tools are namespaced, invoke them through that namespace; never emit a bare name such as children or subtree. Never invent, concatenate, or infer tool names. For existing workspaces, call workspace_status first and verify its path. If that path does not match the requested workspace, call switch_workspace when exposed, then verify workspace_status again; use the CLI only when switching is unavailable or rejected. To list all nodes, pass its root_id as subtree's selector and follow every next_cursor until complete; use children for direct children and likewise follow pagination. The mdtree://tree and mdtree://references resources intentionally serialize complete whole-workspace collections and may be large; use bounded tools for targeted reads. Search defaults to lexical mode. Before semantic or hybrid search, inspect semantic_index_status; semantic provider failures are explicit, and hybrid uses lexical fallback only when hybrid_fallback is true. Semantic index lifecycle tools are registered only in write mode and have equivalent CLI commands. For an uninitialized workspace, use initialize_workspace only when exposed and follow its schema. Do not claim a tool unavailable unless a real call returns that error. Never use the MDTree CLI when an equivalent MCP tool is exposed. ";
 
 #[derive(Clone)]
 pub struct MdtreeServer {
@@ -45,6 +59,7 @@ pub struct MdtreeServer {
     tool_router: ToolRouter<Self>,
     access_mode: McpAccessMode,
     workspace_switch_policy: Option<WorkspaceSwitchPolicy>,
+    semantic: McpSemanticConfig,
 }
 
 struct WorkspaceBinding {
@@ -328,10 +343,33 @@ impl PaginationParams {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchModeParam {
+    Lexical,
+    Semantic,
+    Hybrid,
+}
+
+impl From<SearchModeParam> for SearchMode {
+    fn from(value: SearchModeParam) -> Self {
+        match value {
+            SearchModeParam::Lexical => Self::Lexical,
+            SearchModeParam::Semantic => Self::Semantic,
+            SearchModeParam::Hybrid => Self::Hybrid,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct SearchParams {
     /// Free-text query.
     pub query: String,
+    /// Retrieval channel; defaults to backward-compatible lexical search.
+    pub mode: Option<SearchModeParam>,
+    /// Permit an explicitly labelled lexical-only result if hybrid semantic retrieval fails.
+    #[serde(default)]
+    pub hybrid_fallback: bool,
     /// Structural scope; defaults to the complete workspace.
     pub scope: Option<String>,
     /// Stable ID, slug, or canonical path anchoring non-workspace scopes.
@@ -402,6 +440,7 @@ impl MdtreeServer {
             access_mode,
             Some(SqliteStore::open(path)?),
             None,
+            McpSemanticConfig::default(),
         ))
     }
 
@@ -416,7 +455,13 @@ impl MdtreeServer {
         } else {
             Some(SqliteStore::open(path)?)
         };
-        Ok(Self::from_store(path, access_mode, store, None))
+        Ok(Self::from_store(
+            path,
+            access_mode,
+            store,
+            None,
+            McpSemanticConfig::default(),
+        ))
     }
 
     /// Opens a server with an optional runtime workspace-switching policy.
@@ -424,6 +469,21 @@ impl MdtreeServer {
         path: &Path,
         access_mode: McpAccessMode,
         workspace_switch_policy: Option<WorkspaceSwitchPolicy>,
+    ) -> Result<Self, mdtree_sqlite::WorkspaceError> {
+        Self::open_or_uninitialized_with_mode_policy_and_semantic(
+            path,
+            access_mode,
+            workspace_switch_policy,
+            McpSemanticConfig::default(),
+        )
+    }
+
+    /// Opens a server with workspace-switching and runtime-only Ollama configuration.
+    pub fn open_or_uninitialized_with_mode_policy_and_semantic(
+        path: &Path,
+        access_mode: McpAccessMode,
+        workspace_switch_policy: Option<WorkspaceSwitchPolicy>,
+        semantic: McpSemanticConfig,
     ) -> Result<Self, mdtree_sqlite::WorkspaceError> {
         let store = if !path.exists() && access_mode.allows_write() {
             None
@@ -435,6 +495,7 @@ impl MdtreeServer {
             access_mode,
             store,
             workspace_switch_policy,
+            semantic,
         ))
     }
 
@@ -443,10 +504,12 @@ impl MdtreeServer {
         access_mode: McpAccessMode,
         store: Option<SqliteStore>,
         workspace_switch_policy: Option<WorkspaceSwitchPolicy>,
+        semantic: McpSemanticConfig,
     ) -> Self {
         let mut tool_router = Self::tool_router();
         if access_mode.allows_write() {
             tool_router.merge(Self::write_tool_router());
+            tool_router.merge(Self::semantic_write_tool_router());
         }
         if workspace_switch_policy.is_some() {
             tool_router.merge(Self::switch_tool_router());
@@ -457,6 +520,7 @@ impl MdtreeServer {
             tool_router,
             access_mode,
             workspace_switch_policy,
+            semantic,
         }
     }
 
@@ -477,6 +541,122 @@ impl MdtreeServer {
         let store = self.store()?;
         let id = Self::id_in(&store, selector)?;
         Ok((store, id))
+    }
+
+    fn workspace_path(&self) -> Result<PathBuf, ErrorData> {
+        {
+            let binding = self
+                .binding
+                .lock()
+                .map_err(|_| mcp_error("workspace lock poisoned"))?;
+            if binding.store.is_none() {
+                return Err(invalid(
+                    "workspace is not initialized; call initialize_workspace first",
+                ));
+            }
+            Ok(binding.path.clone())
+        }
+    }
+
+    fn independent_store(&self) -> Result<SqliteStore, ErrorData> {
+        SqliteStore::open(&self.workspace_path()?).map_err(|error| mcp_error(error.to_string()))
+    }
+
+    fn semantic_provider(&self) -> Result<OllamaProvider, ErrorData> {
+        OllamaProvider::new(&self.semantic.ollama).map_err(semantic_error)
+    }
+
+    fn active_semantic_profile(&self, store: &SqliteStore) -> Result<EmbeddingProfile, ErrorData> {
+        let status = store.semantic_index_status().map_err(|_| {
+            semantic_error(SemanticError {
+                code: SemanticErrorCode::OperationFailed,
+                message: "semantic index status could not be read".into(),
+            })
+        })?;
+        let profile = status.profile.ok_or_else(|| {
+            semantic_error(SemanticError {
+                code: SemanticErrorCode::NotConfigured,
+                message: "semantic index is not configured".into(),
+            })
+        })?;
+        if self
+            .semantic
+            .model
+            .as_ref()
+            .is_some_and(|model| model != &profile.model)
+        {
+            return Err(semantic_error(SemanticError {
+                code: SemanticErrorCode::IncompatibleProfile,
+                message: "configured Ollama model does not match the active index".into(),
+            }));
+        }
+        Ok(profile)
+    }
+
+    fn prepare_search(
+        &self,
+        p: &SearchParams,
+    ) -> Result<(SearchRequest, PageLimit, Option<PageCursor>), ErrorData> {
+        let scope = match p.scope.as_deref().unwrap_or("workspace") {
+            "current_node" => SearchScope::CurrentNode,
+            "subtree" => SearchScope::Subtree,
+            "siblings" => SearchScope::Siblings,
+            "parent_subtree" => SearchScope::ParentSubtree,
+            "workspace" => SearchScope::Workspace,
+            "linked" => SearchScope::Linked,
+            value => return Err(invalid(format!("unknown search scope {value}"))),
+        };
+        let store = self.store()?;
+        let scope_node = p
+            .scope_node
+            .as_deref()
+            .map(|selector| Self::id_in(&store, selector))
+            .transpose()?;
+        if scope != SearchScope::Workspace && scope_node.is_none() {
+            return Err(invalid("scope_node is required outside workspace scope"));
+        }
+        let (limit, cursor) = p.pagination.validated().map_err(pagination_error)?;
+        let node_types = p
+            .node_types
+            .iter()
+            .map(|value| NodeType::from_str(value).map_err(|error| invalid(error.to_string())))
+            .collect::<Result<Vec<_>, _>>()?;
+        let statuses = p
+            .statuses
+            .iter()
+            .map(|value| ReferenceType::from_str(value).map_err(|error| invalid(error.to_string())))
+            .collect::<Result<Vec<_>, _>>()?;
+        let filters = SearchFilters {
+            node_types,
+            tags: p.tags.clone(),
+            statuses,
+            min_depth: p.min_depth,
+            max_depth: p.max_depth,
+            created_from: p.created_from,
+            created_to: p.created_to,
+            updated_from: p.updated_from,
+            updated_to: p.updated_to,
+            structure: p.structure.map(Into::into),
+        };
+        filters.validate(scope).map_err(invalid)?;
+        let mode = p.mode.map(Into::into).unwrap_or_default();
+        if p.hybrid_fallback && mode != SearchMode::Hybrid {
+            return Err(invalid("hybrid_fallback requires mode hybrid"));
+        }
+        Ok((
+            SearchRequest {
+                query: p.query.clone(),
+                mode,
+                scope,
+                scope_node,
+                filters,
+                limit: limit.get(),
+                offset: 0,
+                prefix_last_token: true,
+            },
+            limit,
+            cursor,
+        ))
     }
 
     fn id_in(store: &SqliteStore, selector: &str) -> Result<NodeId, ErrorData> {
@@ -522,6 +702,16 @@ impl MdtreeServer {
         json_result(
             workspace_status(store.connection(), store.path())
                 .map_err(|e| mcp_error(e.to_string()))?,
+        )
+    }
+
+    #[tool(description = "Report the active semantic profile, coverage, state, and revision")]
+    async fn semantic_index_status(&self) -> Result<CallToolResult, ErrorData> {
+        let store = self.store()?;
+        json_result(
+            store
+                .semantic_index_status()
+                .map_err(|error| mcp_error(error.to_string()))?,
         )
     }
 
@@ -916,77 +1106,78 @@ impl MdtreeServer {
         )
     }
 
-    #[tool(description = "Search section-oriented content across the workspace")]
+    #[tool(
+        description = "Search section-oriented content using lexical, semantic, or hybrid retrieval"
+    )]
     async fn search(
         &self,
         Parameters(p): Parameters<SearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let scope = match p.scope.as_deref().unwrap_or("workspace") {
-            "current_node" => SearchScope::CurrentNode,
-            "subtree" => SearchScope::Subtree,
-            "siblings" => SearchScope::Siblings,
-            "parent_subtree" => SearchScope::ParentSubtree,
-            "workspace" => SearchScope::Workspace,
-            "linked" => SearchScope::Linked,
-            value => return Err(invalid(format!("unknown search scope {value}"))),
-        };
-        let store = self.store()?;
-        let scope_node = p
-            .scope_node
-            .as_deref()
-            .map(|selector| {
-                let selector =
-                    NodeSelector::from_str(selector).map_err(|error| invalid(error.to_string()))?;
+        let (request, limit, cursor) = self.prepare_search(&p)?;
+        let mode = request.mode;
+        if mode == SearchMode::Lexical {
+            let store = self.independent_store()?;
+            return byte_bounded_page_result(limit, |candidate| {
+                let mut candidate_request = request.clone();
+                candidate_request.limit = candidate.get();
                 store
-                    .resolve(&selector)
-                    .map_err(store_error)?
-                    .map(|node| node.id())
-                    .ok_or_else(|| invalid("node not found"))
-            })
-            .transpose()?;
-        if scope != SearchScope::Workspace && scope_node.is_none() {
-            return Err(invalid("scope_node is required outside workspace scope"));
+                    .search_content_page(&candidate_request, candidate, cursor.as_ref())
+                    .map_err(page_read_error)
+            });
         }
-        let (limit, cursor) = p.pagination.validated().map_err(pagination_error)?;
-        let node_types = p
-            .node_types
-            .iter()
-            .map(|value| NodeType::from_str(value).map_err(|error| invalid(error.to_string())))
-            .collect::<Result<Vec<_>, _>>()?;
-        let statuses = p
-            .statuses
-            .iter()
-            .map(|value| ReferenceType::from_str(value).map_err(|error| invalid(error.to_string())))
-            .collect::<Result<Vec<_>, _>>()?;
-        let filters = SearchFilters {
-            node_types,
-            tags: p.tags,
-            statuses,
-            min_depth: p.min_depth,
-            max_depth: p.max_depth,
-            created_from: p.created_from,
-            created_to: p.created_to,
-            updated_from: p.updated_from,
-            updated_to: p.updated_to,
-            structure: p.structure.map(Into::into),
+        let path = self.workspace_path()?;
+        let profile = {
+            let store = SqliteStore::open(&path).map_err(|error| mcp_error(error.to_string()))?;
+            self.active_semantic_profile(&store)?
         };
-        filters.validate(scope).map_err(invalid)?;
-        let request = SearchRequest {
-            query: p.query,
-            scope,
-            scope_node,
-            filters,
-            limit: limit.get(),
-            offset: 0,
-            prefix_last_token: true,
-        };
-        byte_bounded_page_result(limit, |candidate| {
-            let mut candidate_request = request.clone();
-            candidate_request.limit = candidate.get();
-            store
-                .search_content_page(&candidate_request, candidate, cursor.as_ref())
-                .map_err(page_read_error)
+        let provider = self.semantic_provider()?;
+        let fallback = p.hybrid_fallback;
+        let value = tokio::task::spawn_blocking(move || {
+            let store = SqliteStore::open(&path).map_err(|error| mcp_error(error.to_string()))?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| mcp_error("semantic search runtime could not be created"))?;
+            if mode == SearchMode::Semantic {
+                serde_json::to_value(
+                    runtime
+                        .block_on(search_semantic(
+                            &store,
+                            &provider,
+                            &profile,
+                            &request,
+                            limit,
+                            cursor.as_ref(),
+                        ))
+                        .map_err(semantic_search_error)?,
+                )
+                .map_err(json_error)
+            } else {
+                serde_json::to_value(
+                    runtime
+                        .block_on(search_hybrid(
+                            &store,
+                            &provider,
+                            &profile,
+                            &request,
+                            limit,
+                            cursor.as_ref(),
+                            HybridSearchOptions {
+                                fallback: if fallback {
+                                    HybridFallbackPolicy::Lexical
+                                } else {
+                                    HybridFallbackPolicy::Error
+                                },
+                            },
+                        ))
+                        .map_err(semantic_search_error)?,
+                )
+                .map_err(json_error)
+            }
         })
+        .await
+        .map_err(|_| mcp_error("semantic search worker failed"))??;
+        json_value_result(value)
     }
 
     #[tool(description = "Locate the best structural destination with confidence and alternatives")]
@@ -1307,6 +1498,19 @@ fn pagination_error(error: PaginationError) -> ErrorData {
     )
 }
 #[allow(clippy::needless_pass_by_value)]
+fn semantic_error(error: SemanticError) -> ErrorData {
+    ErrorData::invalid_params(
+        error.message.clone(),
+        Some(serde_json::json!({"code":error.code,"semantic":error})),
+    )
+}
+fn semantic_search_error(error: SemanticSearchError) -> ErrorData {
+    match error {
+        SemanticSearchError::Semantic(error) => semantic_error(error),
+        SemanticSearchError::Page(error) => page_read_error(error),
+    }
+}
+#[allow(clippy::needless_pass_by_value)]
 fn json_error(error: serde_json::Error) -> ErrorData {
     mcp_error(error.to_string())
 }
@@ -1519,9 +1723,21 @@ mod tests {
             "backlinks",
             "resolve_reference",
             "workspace_status",
+            "semantic_index_status",
             "validate",
         ] {
             assert!(names.contains(&required), "missing {required}");
+        }
+        let search_schema = serde_json::to_string(
+            &tools
+                .iter()
+                .find(|tool| tool.name == "search")
+                .expect("search tool")
+                .input_schema,
+        )
+        .expect("search schema");
+        for value in ["mode", "lexical", "semantic", "hybrid", "hybrid_fallback"] {
+            assert!(search_schema.contains(value), "search schema lacks {value}");
         }
         for paginated in [
             "children",
@@ -1629,6 +1845,7 @@ mod tests {
         let root_id = "01JZ8Q5CWPN8T7KPN5A1V9B6XM";
         let tool_cases = vec![
             ("workspace_status", serde_json::json!({})),
+            ("semantic_index_status", serde_json::json!({})),
             ("node", serde_json::json!({"selector":root_id})),
             ("batch_nodes", serde_json::json!({"selectors":[root_id]})),
             (
@@ -1704,6 +1921,23 @@ mod tests {
             assert_ne!(response.is_error, Some(true), "{name} failed");
             assert!(!response.content.is_empty(), "{name} was empty");
         }
+        let semantic = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new("search").with_arguments(
+                    serde_json::json!({
+                        "query":"conceptual retry policy",
+                        "mode":"semantic",
+                        "limit":10
+                    })
+                    .as_object()
+                    .expect("arguments")
+                    .clone(),
+                ),
+            )
+            .await
+            .expect_err("semantic tool error");
+        assert!(format!("{semantic:?}").contains("not_configured"));
         let invalid = client
             .peer()
             .call_tool(CallToolRequestParams::new("node"))
@@ -1834,7 +2068,19 @@ mod tests {
         assert!(!read_names.iter().any(|name| name == "rename_node"));
         assert!(!read_names.iter().any(|name| name == "move_node"));
         assert!(!read_names.iter().any(|name| name == "reorder_node"));
-        assert_eq!(write_names.len(), read_names.len() + 14);
+        for name in [
+            "semantic_index_build",
+            "semantic_index_resume",
+            "semantic_index_retry",
+            "semantic_index_clear",
+        ] {
+            assert!(write_names.iter().any(|candidate| candidate == name));
+            assert!(!read_names.iter().any(|candidate| candidate == name));
+        }
+        assert!(read_names
+            .iter()
+            .any(|name| name == "semantic_index_status"));
+        assert_eq!(write_names.len(), read_names.len() + 18);
         assert!(read_only
             .get_info()
             .instructions

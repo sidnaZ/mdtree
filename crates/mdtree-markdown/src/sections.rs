@@ -22,6 +22,28 @@ pub enum MarkdownError {
     /// A derived domain record failed validation.
     #[error(transparent)]
     Domain(#[from] mdtree_core::DomainError),
+    /// The caller requested an embedding-input representation this version cannot build.
+    #[error("unsupported semantic input format version {0}")]
+    UnsupportedSemanticInputFormat(u32),
+    /// Metadata and framing leave no room for even one byte of section content.
+    #[error("semantic input requires at least {required} bytes but maximum is {maximum}")]
+    SemanticInputLimit {
+        /// Smallest usable complete input size.
+        required: usize,
+        /// Configured complete input bound.
+        maximum: usize,
+    },
+    /// Chunk bounds cannot guarantee deterministic forward progress.
+    #[error("invalid semantic chunk options: {0}")]
+    SemanticChunkOptions(String),
+    /// A section from another canonical node was supplied for embedding.
+    #[error("semantic section belongs to node {actual}, expected {expected}")]
+    SemanticSectionNodeMismatch {
+        /// Canonical node whose metadata supplies the embedding context.
+        expected: NodeId,
+        /// Node recorded by the derived section.
+        actual: NodeId,
+    },
 }
 
 /// Tracks duplicate anchor counts within one Markdown document.

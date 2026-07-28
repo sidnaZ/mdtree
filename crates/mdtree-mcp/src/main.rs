@@ -51,6 +51,14 @@ async fn main() -> anyhow::Result<()> {
     let mut fallback_workspace = None;
     let mut workspace_roots = Vec::new();
     let mut allow_workspace_switch = false;
+    let mut ollama_url = std::env::var("MDTREE_OLLAMA_URL")
+        .unwrap_or_else(|_| mdtree_semantic::DEFAULT_OLLAMA_BASE_URL.into());
+    let mut ollama_model = std::env::var("MDTREE_OLLAMA_MODEL").ok();
+    let mut ollama_timeout_seconds = std::env::var("MDTREE_OLLAMA_TIMEOUT_SECONDS")
+        .ok()
+        .map(|value| value.parse::<u64>())
+        .transpose()?
+        .unwrap_or(60);
     let mut allow_write = std::env::var("MDTREE_MCP_ALLOW_WRITE")
         .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
     let mut arguments = std::env::args_os().skip(1);
@@ -74,6 +82,27 @@ async fn main() -> anyhow::Result<()> {
                     "only one fallback workspace path may be supplied"
                 ));
             }
+        } else if argument == "--ollama-url" {
+            ollama_url = arguments
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--ollama-url requires a URL"))?
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("--ollama-url must be valid UTF-8"))?;
+        } else if argument == "--ollama-model" {
+            ollama_model = Some(
+                arguments
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--ollama-model requires a model"))?
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("--ollama-model must be valid UTF-8"))?,
+            );
+        } else if argument == "--ollama-timeout-seconds" {
+            ollama_timeout_seconds = arguments
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--ollama-timeout-seconds requires a value"))?
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("--ollama-timeout-seconds must be valid UTF-8"))?
+                .parse()?;
         } else if workspace.replace(argument).is_some() {
             return Err(anyhow::anyhow!("only one workspace path may be supplied"));
         }
@@ -91,10 +120,20 @@ async fn main() -> anyhow::Result<()> {
         mdtree_mcp::McpAccessMode::ReadOnly
     };
     let workspace_switch_policy = workspace_switch_policy(allow_workspace_switch, workspace_roots)?;
-    let server = mdtree_mcp::MdtreeServer::open_or_uninitialized_with_mode_and_policy(
+    let semantic = mdtree_mcp::McpSemanticConfig {
+        ollama: mdtree_semantic::OllamaConfig {
+            base_url: ollama_url,
+            timeout: std::time::Duration::from_secs(ollama_timeout_seconds),
+        },
+        model: ollama_model,
+    };
+    mdtree_semantic::OllamaProvider::new(&semantic.ollama)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let server = mdtree_mcp::MdtreeServer::open_or_uninitialized_with_mode_policy_and_semantic(
         std::path::Path::new(&workspace),
         mode,
         workspace_switch_policy,
+        semantic,
     )?;
     server
         .serve(rmcp::transport::stdio())

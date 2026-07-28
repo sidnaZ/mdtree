@@ -4,25 +4,27 @@ members = [
     "crates/mdtree-core",
     "crates/mdtree-markdown",
     "crates/mdtree-mcp",
+    "crates/mdtree-semantic",
     "crates/mdtree-sqlite",
     "crates/mdtree-web",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.88"
 license-file = "LICENSE"
 repository = "https://github.com/sidnaZ/mdtree-ui"
 
 [workspace.dependencies]
-mdtree-core = { path = "crates/mdtree-core", version = "0.1.0" }
-mdtree-markdown = { path = "crates/mdtree-markdown", version = "0.1.0" }
-mdtree-sqlite = { path = "crates/mdtree-sqlite", version = "0.1.0" }
-mdtree-web = { path = "crates/mdtree-web", version = "0.1.0" }
+mdtree-core = { path = "crates/mdtree-core", version = "0.2.0" }
+mdtree-markdown = { path = "crates/mdtree-markdown", version = "0.2.0" }
+mdtree-sqlite = { path = "crates/mdtree-sqlite", version = "0.2.0" }
+mdtree-web = { path = "crates/mdtree-web", version = "0.2.0" }
 ammonia = "4.1.3"
 anyhow = "1.0.103"
+async-trait = "0.1.89"
 axum = "0.8.7"
 blake3 = "1.8.5"
 clap = "4.6.1"
@@ -32,6 +34,7 @@ crossterm = "0.29.0"
 futures-util = "0.3.32"
 pulldown-cmark = "0.13.4"
 rand = "0.10.2"
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 rmcp = "2.2.0"
 rusqlite = { version = "0.40.1", features = ["backup", "bundled"] }
 serde = "1.0.228"

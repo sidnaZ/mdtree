@@ -13,6 +13,7 @@ clap = { workspace = true, features = ["derive", "env"] }
 clap_complete.workspace = true
 crossterm.workspace = true
 mdtree-core.workspace = true
+mdtree-semantic = { path = "../mdtree-semantic", version = "0.2.0" }
 mdtree-sqlite.workspace = true
 mdtree-web.workspace = true
 serde.workspace = true

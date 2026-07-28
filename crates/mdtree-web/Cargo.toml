@@ -13,6 +13,7 @@ anyhow.workspace = true
 axum = { workspace = true, features = ["ws"] }
 mdtree-core.workspace = true
 mdtree-markdown.workspace = true
+mdtree-semantic = { path = "../mdtree-semantic", version = "0.2.0" }
 mdtree-sqlite.workspace = true
 pulldown-cmark.workspace = true
 rand.workspace = true

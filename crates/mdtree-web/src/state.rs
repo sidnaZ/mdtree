@@ -1,5 +1,6 @@
 //! Shared application state available to every route and middleware layer.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use mdtree_core::NodeId;
@@ -8,6 +9,7 @@ use tokio::sync::{broadcast, watch};
 
 use crate::change_hub::ChangeEvent;
 use crate::lifecycle::ClientActivity;
+use crate::WebSemanticConfig;
 
 /// One open workspace within a `browse-ui` session, identified by its
 /// position in [`AppState::workspaces`].
@@ -15,6 +17,8 @@ use crate::lifecycle::ClientActivity;
 pub(crate) struct WorkspaceState {
     /// The open workspace, guarded for shared access across requests.
     pub(crate) store: Arc<Mutex<SqliteStore>>,
+    /// Database path used for independent semantic requests that must not hold the UI mutex.
+    pub(crate) path: PathBuf,
     /// The resolved initial subtree root for this workspace.
     pub(crate) root: NodeId,
     /// Display label shown in the workspace-switcher panel: the workspace's
@@ -46,4 +50,6 @@ pub(crate) struct AppState {
     /// Tracks connected WebSocket clients, across every workspace, for the
     /// last-client-disconnect grace period.
     pub(crate) client_activity: Arc<ClientActivity>,
+    /// Runtime-only embedding provider configuration.
+    pub(crate) semantic: WebSemanticConfig,
 }

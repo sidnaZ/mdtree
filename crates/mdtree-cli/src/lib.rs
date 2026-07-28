@@ -5,14 +5,21 @@ use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode, Stdio};
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use mdtree_core::{
-    BatchChildrenRequest, CloneSubtreeRequest, Node, NodeId, NodeMetadata, NodeSelector, NodeType,
-    PageCursor, PageLimit, PaginationError, Reference, ReferenceOrigin, ReferenceTarget,
-    ReferenceType, SearchFilters, SearchRequest, SearchScope, Slug, SystemUlidGenerator,
-    UlidGenerator, DEFAULT_PAGE_LIMIT,
+    BatchChildrenRequest, CloneSubtreeRequest, EmbeddingMetric, EmbeddingProfile, Node, NodeId,
+    NodeMetadata, NodeSelector, NodeType, PageCursor, PageLimit, PaginationError, Reference,
+    ReferenceOrigin, ReferenceTarget, ReferenceType, SearchFilters, SearchMode, SearchRequest,
+    SearchScope, SemanticError, Slug, SystemUlidGenerator, UlidGenerator, DEFAULT_PAGE_LIMIT,
+    SEMANTIC_INPUT_FORMAT_VERSION,
+};
+use mdtree_semantic::{
+    build_semantic_index, clear_semantic_index, resume_semantic_index, retry_semantic_index,
+    search_hybrid, search_semantic, HybridFallbackPolicy, HybridSearchOptions, OllamaConfig,
+    OllamaProvider, SemanticBuildOptions, SemanticSearchError, DEFAULT_OLLAMA_BASE_URL,
 };
 use mdtree_sqlite::{
     backup_workspace, check_workspace, doctor_workspace, export_markdown_node,
@@ -39,6 +46,28 @@ pub enum OutputFormat {
     Json,
     /// One JSON value per output item.
     Jsonl,
+}
+
+/// Explicit content-retrieval channel.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum SearchModeArg {
+    /// Existing FTS-backed behavior.
+    #[default]
+    Lexical,
+    /// Exact embedding similarity.
+    Semantic,
+    /// Reciprocal-rank fusion of lexical and semantic candidates.
+    Hybrid,
+}
+
+impl From<SearchModeArg> for mdtree_core::SearchMode {
+    fn from(value: SearchModeArg) -> Self {
+        match value {
+            SearchModeArg::Lexical => Self::Lexical,
+            SearchModeArg::Semantic => Self::Semantic,
+            SearchModeArg::Hybrid => Self::Hybrid,
+        }
+    }
 }
 
 /// Structural relation selected by `navigate`.
@@ -149,6 +178,25 @@ pub struct Cli {
     /// TCP port for the web UI; omitted or 0 lets the operating system choose.
     #[arg(long, global = true, default_value_t = 0)]
     pub port: u16,
+    /// Ollama server base URL (or `MDTREE_OLLAMA_URL`).
+    #[arg(
+        long,
+        global = true,
+        env = "MDTREE_OLLAMA_URL",
+        default_value = DEFAULT_OLLAMA_BASE_URL
+    )]
+    pub ollama_url: String,
+    /// Ollama embedding model (or `MDTREE_OLLAMA_MODEL`).
+    #[arg(long, global = true, env = "MDTREE_OLLAMA_MODEL")]
+    pub ollama_model: Option<String>,
+    /// Ollama request timeout in seconds (or `MDTREE_OLLAMA_TIMEOUT_SECONDS`).
+    #[arg(
+        long,
+        global = true,
+        env = "MDTREE_OLLAMA_TIMEOUT_SECONDS",
+        default_value_t = 60
+    )]
+    pub ollama_timeout_seconds: u64,
     /// Requested operation.
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -215,6 +263,11 @@ pub enum Command {
     },
     /// Rebuild derived sections, references, and search rows.
     RebuildIndexes,
+    /// Build, resume, inspect, retry, or clear the semantic index.
+    SemanticIndex {
+        #[command(subcommand)]
+        action: SemanticIndexCommand,
+    },
     /// Permanently discard historical revisions while retaining every current head.
     PruneHistory {
         /// Report the number of revisions that would be removed without writing.
@@ -378,6 +431,12 @@ pub enum Command {
     Search {
         /// Free-text query.
         query: String,
+        /// Retrieval mode; lexical remains the compatibility default.
+        #[arg(long, value_enum, default_value_t = SearchModeArg::Lexical)]
+        mode: SearchModeArg,
+        /// Explicitly permit lexical-only results when hybrid semantic retrieval fails.
+        #[arg(long, requires = "mode")]
+        hybrid_fallback: bool,
         /// Structural scope: `current_node`, `subtree`, `siblings`, `parent_subtree`, `workspace`,
         /// or `linked`.
         #[arg(
@@ -625,6 +684,43 @@ pub enum Command {
     Duplicates,
 }
 
+/// Semantic-index lifecycle actions.
+#[derive(Clone, Debug, Subcommand)]
+pub enum SemanticIndexCommand {
+    /// Prepare current chunks and build every pending embedding.
+    Build {
+        /// Provider request batch size.
+        #[arg(long, default_value_t = 32)]
+        batch_size: u32,
+        /// Known model vector dimensions; omitted probes Ollama once.
+        #[arg(long)]
+        dimensions: Option<u32>,
+    },
+    /// Resume pending or interrupted work without regenerating chunks.
+    Resume {
+        /// Provider request batch size.
+        #[arg(long, default_value_t = 32)]
+        batch_size: u32,
+    },
+    /// Requeue failed chunks and resume provider work.
+    Retry {
+        /// Provider request batch size.
+        #[arg(long, default_value_t = 32)]
+        batch_size: u32,
+    },
+    /// Report profile, lifecycle counts, state, and semantic revision.
+    Status,
+    /// Clear all derived semantic chunks and deactivate the profile.
+    Clear {
+        /// Show what would be cleared without writing.
+        #[arg(long, conflicts_with = "yes")]
+        dry_run: bool,
+        /// Confirm clearing derived semantic data.
+        #[arg(long, required_unless_present = "dry_run")]
+        yes: bool,
+    },
+}
+
 #[derive(Debug, Deserialize)]
 struct CliAtomicTreeBatch {
     #[serde(default)]
@@ -834,6 +930,9 @@ pub fn execute(cli: &Cli, output: &mut dyn Write) -> anyhow::Result<u8> {
         Command::RebuildIndexes => {
             store.rebuild_derived(&SystemUlidGenerator)?;
             emit(output, cli.output, &serde_json::json!({"status":"rebuilt"}))?;
+        }
+        Command::SemanticIndex { action } => {
+            return execute_semantic_index(cli, output, &mut store, action);
         }
         Command::PruneHistory {
             dry_run,
@@ -1141,6 +1240,8 @@ pub fn execute(cli: &Cli, output: &mut dyn Write) -> anyhow::Result<u8> {
         }
         Command::Search {
             query,
+            mode,
+            hybrid_fallback,
             scope,
             scope_node,
             node_types,
@@ -1185,23 +1286,79 @@ pub fn execute(cli: &Cli, output: &mut dyn Write) -> anyhow::Result<u8> {
                 structure: structure.map(Into::into),
             };
             filters.validate(scope).map_err(anyhow::Error::msg)?;
-            emit(
-                output,
-                cli.output,
-                &store.search_content_page(
-                    &SearchRequest {
-                        query: query.clone(),
-                        scope,
-                        scope_node,
-                        filters,
-                        limit: limit.get(),
-                        offset: 0,
-                        prefix_last_token: true,
-                    },
-                    limit,
-                    cursor.as_ref(),
+            let mode: SearchMode = (*mode).into();
+            if *hybrid_fallback && mode != SearchMode::Hybrid {
+                anyhow::bail!("--hybrid-fallback requires --mode hybrid");
+            }
+            let request = SearchRequest {
+                query: query.clone(),
+                mode,
+                scope,
+                scope_node,
+                filters,
+                limit: limit.get(),
+                offset: 0,
+                prefix_last_token: true,
+            };
+            match mode {
+                SearchMode::Lexical => emit(
+                    output,
+                    cli.output,
+                    &store.search_content_page(&request, limit, cursor.as_ref())?,
                 )?,
-            )?;
+                SearchMode::Semantic | SearchMode::Hybrid => {
+                    let profile = match active_cli_profile(cli, &store) {
+                        Ok(profile) => profile,
+                        Err(error) => {
+                            return emit_semantic_error(output, cli.output, &error, None);
+                        }
+                    };
+                    let provider = match cli_ollama_provider(cli) {
+                        Ok(provider) => provider,
+                        Err(error) => {
+                            return emit_semantic_error(output, cli.output, &error, None);
+                        }
+                    };
+                    let runtime = tokio::runtime::Runtime::new()?;
+                    if mode == SearchMode::Semantic {
+                        match runtime.block_on(search_semantic(
+                            &store,
+                            &provider,
+                            &profile,
+                            &request,
+                            limit,
+                            cursor.as_ref(),
+                        )) {
+                            Ok(response) => emit(output, cli.output, &response)?,
+                            Err(error) => {
+                                return emit_search_error(output, cli.output, error);
+                            }
+                        }
+                    } else {
+                        let options = HybridSearchOptions {
+                            fallback: if *hybrid_fallback {
+                                HybridFallbackPolicy::Lexical
+                            } else {
+                                HybridFallbackPolicy::Error
+                            },
+                        };
+                        match runtime.block_on(search_hybrid(
+                            &store,
+                            &provider,
+                            &profile,
+                            &request,
+                            limit,
+                            cursor.as_ref(),
+                            options,
+                        )) {
+                            Ok(response) => emit(output, cli.output, &response)?,
+                            Err(error) => {
+                                return emit_search_error(output, cli.output, error);
+                            }
+                        }
+                    }
+                }
+            }
         }
         Command::Locate { query, node_type } => {
             let kind = node_type.as_deref().map(NodeType::from_str).transpose()?;
@@ -1640,6 +1797,230 @@ pub fn execute(cli: &Cli, output: &mut dyn Write) -> anyhow::Result<u8> {
     Ok(EXIT_OK)
 }
 
+#[allow(clippy::too_many_lines)]
+fn execute_semantic_index(
+    cli: &Cli,
+    output: &mut dyn Write,
+    store: &mut SqliteStore,
+    action: &SemanticIndexCommand,
+) -> anyhow::Result<u8> {
+    match action {
+        SemanticIndexCommand::Status => {
+            let index = store.semantic_index_status()?;
+            emit(
+                output,
+                cli.output,
+                &serde_json::json!({
+                    "state": index.coverage.state(),
+                    "index": index,
+                }),
+            )?;
+            Ok(EXIT_OK)
+        }
+        SemanticIndexCommand::Clear { dry_run, yes: _ } => {
+            let before = store.semantic_index_status()?;
+            if *dry_run {
+                emit(
+                    output,
+                    cli.output,
+                    &serde_json::json!({
+                        "status": "planned",
+                        "would_clear_chunks": before.coverage.total,
+                        "index": before,
+                    }),
+                )?;
+            } else {
+                let after = match clear_semantic_index(store) {
+                    Ok(after) => after,
+                    Err(error) => {
+                        return emit_semantic_error(output, cli.output, &error, Some(&before));
+                    }
+                };
+                emit(
+                    output,
+                    cli.output,
+                    &serde_json::json!({"status":"cleared","index":after}),
+                )?;
+            }
+            Ok(EXIT_OK)
+        }
+        SemanticIndexCommand::Build {
+            batch_size,
+            dimensions,
+        } => {
+            let provider = match cli_ollama_provider(cli) {
+                Ok(provider) => provider,
+                Err(error) => return emit_semantic_error(output, cli.output, &error, None),
+            };
+            let Some(model) = cli.ollama_model.as_deref() else {
+                return emit_semantic_error(
+                    output,
+                    cli.output,
+                    &SemanticError {
+                        code: mdtree_core::SemanticErrorCode::NotConfigured,
+                        message: "Ollama embedding model is required for index build".into(),
+                    },
+                    None,
+                );
+            };
+            let runtime = tokio::runtime::Runtime::new()?;
+            let profile = if let Some(dimensions) = dimensions {
+                EmbeddingProfile {
+                    provider: "ollama".into(),
+                    model: model.into(),
+                    dimensions: *dimensions,
+                    metric: EmbeddingMetric::Cosine,
+                    input_format_version: SEMANTIC_INPUT_FORMAT_VERSION,
+                }
+            } else {
+                match runtime.block_on(provider.discover_profile(model)) {
+                    Ok(profile) => profile,
+                    Err(error) => {
+                        return emit_semantic_error(output, cli.output, &error, None);
+                    }
+                }
+            };
+            let started = Instant::now();
+            let result = runtime.block_on(build_semantic_index(
+                store,
+                &provider,
+                &profile,
+                SemanticBuildOptions {
+                    batch_size: *batch_size,
+                    ..SemanticBuildOptions::default()
+                },
+                now_millis()?,
+            ));
+            emit_build_result(output, cli.output, result, started.elapsed())
+        }
+        SemanticIndexCommand::Resume { batch_size }
+        | SemanticIndexCommand::Retry { batch_size } => {
+            let profile = match active_cli_profile(cli, store) {
+                Ok(profile) => profile,
+                Err(error) => return emit_semantic_error(output, cli.output, &error, None),
+            };
+            let provider = match cli_ollama_provider(cli) {
+                Ok(provider) => provider,
+                Err(error) => return emit_semantic_error(output, cli.output, &error, None),
+            };
+            let runtime = tokio::runtime::Runtime::new()?;
+            let started = Instant::now();
+            let updated_at = now_millis()?;
+            let result = match action {
+                SemanticIndexCommand::Resume { .. } => runtime.block_on(resume_semantic_index(
+                    store,
+                    &provider,
+                    &profile,
+                    *batch_size,
+                    updated_at,
+                )),
+                SemanticIndexCommand::Retry { .. } => runtime.block_on(retry_semantic_index(
+                    store,
+                    &provider,
+                    &profile,
+                    *batch_size,
+                    updated_at,
+                )),
+                _ => unreachable!(),
+            };
+            emit_build_result(output, cli.output, result, started.elapsed())
+        }
+    }
+}
+
+fn cli_ollama_provider(cli: &Cli) -> Result<OllamaProvider, SemanticError> {
+    OllamaProvider::new(&OllamaConfig {
+        base_url: cli.ollama_url.clone(),
+        timeout: Duration::from_secs(cli.ollama_timeout_seconds),
+    })
+}
+
+fn active_cli_profile(cli: &Cli, store: &SqliteStore) -> Result<EmbeddingProfile, SemanticError> {
+    let status = store.semantic_index_status().map_err(|_| SemanticError {
+        code: mdtree_core::SemanticErrorCode::OperationFailed,
+        message: "semantic index status could not be read".into(),
+    })?;
+    let profile = status.profile.ok_or_else(|| SemanticError {
+        code: mdtree_core::SemanticErrorCode::NotConfigured,
+        message: "semantic index is not configured; run semantic-index build".into(),
+    })?;
+    if cli
+        .ollama_model
+        .as_ref()
+        .is_some_and(|model| model != &profile.model)
+    {
+        return Err(SemanticError {
+            code: mdtree_core::SemanticErrorCode::IncompatibleProfile,
+            message: "configured Ollama model does not match the active index".into(),
+        });
+    }
+    Ok(profile)
+}
+
+fn emit_build_result(
+    output: &mut dyn Write,
+    format: OutputFormat,
+    result: Result<mdtree_semantic::SemanticBuildReport, mdtree_semantic::SemanticBuildFailure>,
+    duration: Duration,
+) -> anyhow::Result<u8> {
+    match result {
+        Ok(report) => {
+            emit(
+                output,
+                format,
+                &serde_json::json!({
+                    "status":"complete",
+                    "duration_ms":duration.as_millis(),
+                    "report":report,
+                }),
+            )?;
+            Ok(EXIT_OK)
+        }
+        Err(failure) => {
+            emit(
+                output,
+                format,
+                &serde_json::json!({
+                    "status":"partial",
+                    "duration_ms":duration.as_millis(),
+                    "error":failure.error,
+                    "report":failure.report,
+                }),
+            )?;
+            Ok(EXIT_OPERATIONAL)
+        }
+    }
+}
+
+fn emit_semantic_error(
+    output: &mut dyn Write,
+    format: OutputFormat,
+    error: &SemanticError,
+    index: Option<&mdtree_core::SemanticIndexStatus>,
+) -> anyhow::Result<u8> {
+    emit(
+        output,
+        format,
+        &serde_json::json!({
+            "status":"error",
+            "error":error,
+            "index":index,
+        }),
+    )?;
+    Ok(EXIT_OPERATIONAL)
+}
+
+fn emit_search_error(
+    output: &mut dyn Write,
+    format: OutputFormat,
+    error: SemanticSearchError,
+) -> anyhow::Result<u8> {
+    match error {
+        SemanticSearchError::Semantic(error) => emit_semantic_error(output, format, &error, None),
+        SemanticSearchError::Page(error) => Err(error.into()),
+    }
+}
+
 fn execute_onboarding(cli: &Cli, output: &mut dyn Write) -> anyhow::Result<u8> {
     let workspace = required_workspace(cli);
     if !workspace.exists() && cli.workspace.is_none() {
@@ -1702,6 +2083,13 @@ fn serve_web_ui(
         selector: selector.map(str::to_owned),
         open_browser,
         port: cli.port,
+        semantic: mdtree_web::WebSemanticConfig {
+            ollama: OllamaConfig {
+                base_url: cli.ollama_url.clone(),
+                timeout: Duration::from_secs(cli.ollama_timeout_seconds),
+            },
+            model: cli.ollama_model.clone(),
+        },
     };
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(mdtree_web::run(&workspaces, options))?;
@@ -1718,6 +2106,14 @@ fn launch_web_ui(
     command
         .arg("--workspace")
         .arg(required_workspace(cli))
+        .arg("--ollama-url")
+        .arg(&cli.ollama_url)
+        .arg("--ollama-timeout-seconds")
+        .arg(cli.ollama_timeout_seconds.to_string());
+    if let Some(model) = &cli.ollama_model {
+        command.arg("--ollama-model").arg(model);
+    }
+    command
         .arg("__serve-ui")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -3357,6 +3753,9 @@ mod tests {
                 output: OutputFormat::Json,
                 no_open: false,
                 port: 0,
+                ollama_url: mdtree_semantic::DEFAULT_OLLAMA_BASE_URL.into(),
+                ollama_model: None,
+                ollama_timeout_seconds: 60,
                 command: Some(command),
             },
             &mut output,
@@ -3449,6 +3848,9 @@ mod tests {
                     output: OutputFormat::Json,
                     no_open: false,
                     port: 0,
+                    ollama_url: mdtree_semantic::DEFAULT_OLLAMA_BASE_URL.into(),
+                    ollama_model: None,
+                    ollama_timeout_seconds: 60,
                     command: Some(command),
                 },
                 &mut Vec::new(),
@@ -3469,6 +3871,9 @@ mod tests {
                 output: OutputFormat::Json,
                 no_open: false,
                 port: 0,
+                ollama_url: mdtree_semantic::DEFAULT_OLLAMA_BASE_URL.into(),
+                ollama_model: None,
+                ollama_timeout_seconds: 60,
                 command: Some(command),
             },
             &mut Vec::new(),
@@ -3693,6 +4098,8 @@ mod tests {
             &workspace,
             Command::Search {
                 query: "domain events kafka".into(),
+                mode: super::SearchModeArg::Lexical,
+                hybrid_fallback: false,
                 scope: "workspace".into(),
                 scope_node: None,
                 node_types: Vec::new(),
@@ -3806,6 +4213,8 @@ mod tests {
                 &workspace,
                 Command::Search {
                     query: "order model".into(),
+                    mode: super::SearchModeArg::Lexical,
+                    hybrid_fallback: false,
                     scope: "workspace".into(),
                     scope_node: None,
                     node_types: Vec::new(),
@@ -3881,6 +4290,9 @@ mod tests {
                 output: OutputFormat::Json,
                 no_open: false,
                 port: 0,
+                ollama_url: mdtree_semantic::DEFAULT_OLLAMA_BASE_URL.into(),
+                ollama_model: None,
+                ollama_timeout_seconds: 60,
                 command: Some(Command::Update {
                     selector: child.clone(),
                     content: "stale".into(),

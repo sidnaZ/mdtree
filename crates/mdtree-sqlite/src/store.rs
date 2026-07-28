@@ -865,6 +865,7 @@ impl SqliteStore {
                 format!("{sections} sections but {fts} FTS rows"),
             ));
         }
+        append_semantic_integrity_findings(&self.connection, &mut findings)?;
         Ok(IntegrityReport { findings })
     }
 
@@ -2169,6 +2170,43 @@ fn query_ids(connection: &Connection, sql: &str) -> Result<Vec<NodeId>, StoreErr
     let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
     rows.map(|row| NodeId::from_str(&row?).map_err(|e| StoreError::InvalidData(e.to_string())))
         .collect()
+}
+
+fn append_semantic_integrity_findings(
+    connection: &Connection,
+    findings: &mut Vec<IntegrityFinding>,
+) -> Result<(), StoreError> {
+    let invalid_semantic = {
+        let mut statement = connection.prepare(
+            "SELECT sc.node_id,sc.embedding,p.dimensions
+             FROM semantic_chunks sc
+             JOIN semantic_profiles p ON p.id=sc.profile_id
+             WHERE sc.state='ready'",
+        )?;
+        let collected = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, u32>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        collected
+    };
+    for (node, embedding, dimensions) in invalid_semantic {
+        if !crate::semantic::embedding_blob_is_valid(&embedding, dimensions) {
+            findings.push(finding(
+                "semantic_embedding",
+                Some(
+                    NodeId::from_str(&node)
+                        .map_err(|error| StoreError::InvalidData(error.to_string()))?,
+                ),
+                "ready embedding is non-finite or has the wrong byte length".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn finding(code: &'static str, node_id: Option<NodeId>, detail: String) -> IntegrityFinding {

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Breadcrumb, NodeId, NodeType, ReferenceType, StructuralPredicate};
+use crate::{Breadcrumb, NodeId, NodeType, ReferenceType, SearchMode, StructuralPredicate};
 
 /// Converts free text to an operator-safe FTS5 conjunction.
 ///
@@ -126,6 +126,9 @@ impl SearchFilters {
 pub struct SearchRequest {
     /// User query text.
     pub query: String,
+    /// Requested retrieval channel; omitted JSON preserves lexical compatibility.
+    #[serde(default, skip_serializing_if = "SearchMode::is_lexical")]
+    pub mode: SearchMode,
     /// Structural scope.
     pub scope: SearchScope,
     /// Node anchoring non-workspace scopes.
@@ -216,12 +219,13 @@ pub struct LocateResult {
 mod tests {
     use serde_json::json;
 
-    use super::{normalize_fts_query, SearchFilters, SearchRequest, SearchScope};
+    use super::{normalize_fts_query, SearchFilters, SearchMode, SearchRequest, SearchScope};
 
     #[test]
     fn content_search_request_has_stable_json_contract() {
         let request = SearchRequest {
             query: "order model".into(),
+            mode: SearchMode::Lexical,
             scope: SearchScope::Subtree,
             scope_node: None,
             filters: SearchFilters::default(),
@@ -236,6 +240,12 @@ mod tests {
                 "filters":{"node_types":[],"tags":[]},"limit":20,"offset":0,"prefix_last_token":true
             })
         );
+        let decoded: SearchRequest = serde_json::from_value(json!({
+            "query":"order model","scope":"subtree","scope_node":null,
+            "filters":{"node_types":[],"tags":[]},"limit":20,"offset":0,"prefix_last_token":true
+        }))
+        .expect("legacy lexical request");
+        assert_eq!(decoded.mode, SearchMode::Lexical);
     }
 
     #[test]

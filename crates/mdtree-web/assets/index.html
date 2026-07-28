@@ -311,6 +311,18 @@
         hidden
         class="fixed z-50 w-[28rem] overflow-hidden rounded-md border border-slate-200 bg-white shadow-2xl shadow-slate-400/30 dark:border-slate-800 dark:bg-slate-900 dark:shadow-black/50"
       >
+        <div class="flex items-center gap-2 border-b border-slate-200 p-2 dark:border-slate-800">
+          <label class="text-[10px] font-semibold uppercase tracking-wide text-slate-500" for="search-mode">Mode</label>
+          <select id="search-mode" class="h-7 rounded border border-slate-300 bg-white px-2 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
+            <option value="lexical">Lexical</option>
+            <option value="semantic">Semantic</option>
+            <option value="hybrid">Hybrid</option>
+          </select>
+          <label id="hybrid-fallback-label" hidden class="ml-auto flex items-center gap-1 text-[11px] text-slate-500">
+            <input id="hybrid-fallback" type="checkbox" />
+            Lexical fallback
+          </label>
+        </div>
         <div class="relative p-2">
           <svg viewBox="0 0 20 20" fill="none" class="pointer-events-none absolute left-4 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400 dark:text-slate-500" stroke="currentColor" stroke-width="1.6">
             <circle cx="8.5" cy="8.5" r="5.5" />
@@ -326,6 +338,7 @@
             class="h-9 w-full rounded-md border border-slate-300 bg-white pl-7 pr-2.5 text-sm text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:placeholder:text-slate-500"
           />
         </div>
+        <div id="semantic-index-status" hidden class="border-t border-slate-200 px-3 py-1.5 text-[11px] text-slate-500 dark:border-slate-800 dark:text-slate-400"></div>
         <div
           id="search-dropdown"
           class="search-scroll max-h-96 overflow-y-auto border-t border-slate-200 py-1 dark:border-slate-800"

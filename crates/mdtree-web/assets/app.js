@@ -835,12 +835,27 @@ function setUpSearch() {
   const input = document.getElementById("search-input");
   const popover = document.getElementById("search-popover");
   const trigger = document.getElementById("control-search");
+  const mode = document.getElementById("search-mode");
+  const fallback = document.getElementById("hybrid-fallback");
+  const fallbackLabel = document.getElementById("hybrid-fallback-label");
 
   trigger.addEventListener("click", () => {
     if (popover.hidden) {
       showSearchPopover();
     } else {
       hideSearchPopover();
+    }
+  });
+  mode.addEventListener("change", () => {
+    fallbackLabel.hidden = mode.value !== "hybrid";
+    refreshSemanticIndexStatus().catch(reportError);
+    if (input.value.trim() !== "") {
+      runSearch(input.value).catch(reportError);
+    }
+  });
+  fallback.addEventListener("change", () => {
+    if (input.value.trim() !== "") {
+      runSearch(input.value).catch(reportError);
     }
   });
   input.addEventListener("input", () => {
@@ -1019,6 +1034,7 @@ function showSearchPopover() {
   input.value = "";
   input.focus();
   showSearchHint();
+  refreshSemanticIndexStatus().catch(reportError);
 }
 
 function hideSearchPopover() {
@@ -1050,11 +1066,44 @@ function showSearchHint() {
 
 async function runSearch(query) {
   const token = (searchRequestToken += 1);
-  const response = await fetchJson(`/api/search?q=${encodeURIComponent(query)}`);
+  const mode = document.getElementById("search-mode").value;
+  const fallback = document.getElementById("hybrid-fallback").checked;
+  const response = await fetchJson(
+    `/api/search?q=${encodeURIComponent(query)}&mode=${mode}&hybrid_fallback=${fallback}`,
+  );
   if (token !== searchRequestToken) {
     return; // superseded by a newer keystroke
   }
+  renderSemanticEvidence(response);
   renderSearchResults(response.matches);
+}
+
+async function refreshSemanticIndexStatus() {
+  const status = document.getElementById("semantic-index-status");
+  const mode = document.getElementById("search-mode").value;
+  status.hidden = mode === "lexical";
+  if (status.hidden) {
+    return;
+  }
+  const response = await fetchJson("/api/semantic-index");
+  const states = response.workspaces.map(
+    (workspace) =>
+      `${workspaces.get(workspace.workspace_id)?.name ?? workspace.workspace_id}: ${workspace.state}`,
+  );
+  status.textContent = `${response.model ?? "active index model"} · ${states.join(" · ")}`;
+}
+
+function renderSemanticEvidence(response) {
+  if (response.mode === "lexical") {
+    return;
+  }
+  const status = document.getElementById("semantic-index-status");
+  status.hidden = false;
+  const states = response.semantic.map((workspace) => {
+    const fallback = workspace.fallback ? `, fallback: ${workspace.fallback}` : "";
+    return `${workspaces.get(workspace.workspace_id)?.name ?? workspace.workspace_id}: ${workspace.state}${fallback}`;
+  });
+  status.textContent = states.join(" · ");
 }
 
 function renderSearchResults(matches) {

@@ -2,10 +2,11 @@
 
 use serde_json::Value;
 
-use crate::{ApplicationError, NodeHash, NodeId, NodeMetadata, Slug};
+use crate::{ApplicationError, EmbeddingProfile, NodeHash, NodeId, NodeMetadata, Slug};
 
 const CONTENT_DOMAIN: &[u8] = b"mdtree-content-v1\0";
 const REVISION_DOMAIN: &[u8] = b"mdtree-revision-v1\0";
+const EMBEDDING_INPUT_DOMAIN: &[u8] = b"mdtree-embedding-input-v1\0";
 
 /// Canonical state included in a revision hash.
 ///
@@ -73,6 +74,23 @@ pub fn hash_revision(input: RevisionHashInput<'_>) -> Result<NodeHash, Applicati
     Ok(NodeHash::new(*hasher.finalize().as_bytes()))
 }
 
+/// Hashes an exact embedding input together with its complete compatibility profile.
+///
+/// A model, dimension, metric, or input-format change necessarily invalidates
+/// the digest even when the human-readable input text is unchanged.
+#[must_use]
+pub fn hash_embedding_input(profile: &EmbeddingProfile, input: &str) -> NodeHash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(EMBEDDING_INPUT_DOMAIN);
+    frame(&mut hasher, profile.provider.as_bytes());
+    frame(&mut hasher, profile.model.as_bytes());
+    frame(&mut hasher, &profile.dimensions.to_be_bytes());
+    frame(&mut hasher, profile.metric.as_str().as_bytes());
+    frame(&mut hasher, &profile.input_format_version.to_be_bytes());
+    frame(&mut hasher, input.as_bytes());
+    NodeHash::new(*hasher.finalize().as_bytes())
+}
+
 fn frame(hasher: &mut blake3::Hasher, value: &[u8]) {
     hasher.update(&(value.len() as u64).to_be_bytes());
     hasher.update(value);
@@ -101,8 +119,8 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{hash_content, hash_revision, RevisionHashInput};
-    use crate::{NodeId, NodeMetadata, Slug};
+    use super::{hash_content, hash_embedding_input, hash_revision, RevisionHashInput};
+    use crate::{EmbeddingMetric, EmbeddingProfile, NodeId, NodeMetadata, Slug};
 
     const NODE_ID: &str = "01JZ8Q5CWPN8T7KPN5A1V9B6XM";
     const PARENT_ID: &str = "01JZ8Q5CWPN8T7KPN5A1V9B6XN";
@@ -187,5 +205,45 @@ mod tests {
         for changed in changes {
             assert_ne!(hash_revision(changed).expect("hashable state"), baseline);
         }
+    }
+
+    #[test]
+    fn embedding_hash_covers_exact_input_and_complete_profile() {
+        let profile = EmbeddingProfile {
+            provider: "ollama".into(),
+            model: "embeddinggemma".into(),
+            dimensions: 768,
+            metric: EmbeddingMetric::Cosine,
+            input_format_version: 1,
+        };
+        let baseline = hash_embedding_input(&profile, "title: \"Payments\"");
+        assert_eq!(
+            baseline,
+            hash_embedding_input(&profile, "title: \"Payments\"")
+        );
+        assert_ne!(
+            baseline,
+            hash_embedding_input(&profile, "title: \"Billing\"")
+        );
+        assert_ne!(
+            baseline,
+            hash_embedding_input(
+                &EmbeddingProfile {
+                    model: "all-minilm".into(),
+                    ..profile.clone()
+                },
+                "title: \"Payments\""
+            )
+        );
+        assert_ne!(
+            baseline,
+            hash_embedding_input(
+                &EmbeddingProfile {
+                    input_format_version: 2,
+                    ..profile
+                },
+                "title: \"Payments\""
+            )
+        );
     }
 }

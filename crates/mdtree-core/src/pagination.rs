@@ -165,6 +165,7 @@ impl PageCursor {
         let payload = CursorPayload {
             version: CURSOR_VERSION,
             workspace_revision,
+            index_revision: None,
             scope,
             position,
         };
@@ -199,6 +200,71 @@ impl PageCursor {
             });
         }
         Ok(payload.position)
+    }
+
+    /// Issues a cursor bound to canonical and independently derived index state.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same validation errors as [`Self::issue`].
+    pub fn issue_indexed(
+        workspace_revision: u64,
+        index_revision: u64,
+        scope: CursorScope,
+        position: PagePosition,
+    ) -> Result<Self, PaginationError> {
+        if matches!(
+            &position,
+            PagePosition::Traversal { ordering_path, .. } if ordering_path.is_empty()
+        ) {
+            return Err(PaginationError::InvalidCursorPosition);
+        }
+        let payload = CursorPayload {
+            version: CURSOR_VERSION,
+            workspace_revision,
+            index_revision: Some(index_revision),
+            scope,
+            position,
+        };
+        let bytes = serde_json::to_vec(&payload).map_err(|_| PaginationError::InvalidCursor)?;
+        let checksum = cursor_checksum(&bytes);
+        Ok(Self(format!(
+            "{CURSOR_PREFIX}.{}.{}",
+            encode_hex(&bytes),
+            encode_hex(checksum.as_bytes())
+        )))
+    }
+
+    /// Validates a cursor against canonical and derived index revisions.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable stale-cursor error when either revision changed and an
+    /// invalid-cursor error for a non-indexed or mismatched token.
+    pub fn resume_indexed(
+        &self,
+        expected_scope: &CursorScope,
+        current_workspace_revision: u64,
+        current_index_revision: u64,
+    ) -> Result<PagePosition, PaginationError> {
+        let payload = decode_cursor(&self.0)?;
+        if &payload.scope != expected_scope {
+            return Err(PaginationError::CursorScopeMismatch);
+        }
+        if payload.workspace_revision != current_workspace_revision {
+            return Err(PaginationError::StaleCursor {
+                cursor_revision: payload.workspace_revision,
+                current_revision: current_workspace_revision,
+            });
+        }
+        match payload.index_revision {
+            Some(revision) if revision == current_index_revision => Ok(payload.position),
+            Some(revision) => Err(PaginationError::StaleIndexCursor {
+                cursor_revision: revision,
+                current_revision: current_index_revision,
+            }),
+            None => Err(PaginationError::InvalidCursor),
+        }
     }
 
     /// Returns the adapter-facing opaque token.
@@ -317,6 +383,16 @@ pub enum PaginationError {
         /// Current canonical workspace revision.
         current_revision: u64,
     },
+    /// Derived index state changed after issuance.
+    #[error(
+        "stale pagination cursor: index revision changed from {cursor_revision} to {current_revision}"
+    )]
+    StaleIndexCursor {
+        /// Derived index revision captured by the cursor.
+        cursor_revision: u64,
+        /// Current derived index revision.
+        current_revision: u64,
+    },
 }
 
 impl PaginationError {
@@ -325,7 +401,9 @@ impl PaginationError {
     pub const fn code(&self) -> PaginationErrorCode {
         match self {
             Self::InvalidLimit { .. } => PaginationErrorCode::InvalidLimit,
-            Self::StaleCursor { .. } => PaginationErrorCode::StaleCursor,
+            Self::StaleCursor { .. } | Self::StaleIndexCursor { .. } => {
+                PaginationErrorCode::StaleCursor
+            }
             Self::InvalidCursor
             | Self::CursorScopeMismatch
             | Self::InvalidCursorScope
@@ -338,6 +416,8 @@ impl PaginationError {
 struct CursorPayload {
     version: u8,
     workspace_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    index_revision: Option<u64>,
     scope: CursorScope,
     position: PagePosition,
 }
@@ -468,6 +548,7 @@ mod tests {
         let unsupported = CursorPayload {
             version: 2,
             workspace_revision: 42,
+            index_revision: None,
             scope: expected_scope,
             position: PagePosition::Traversal {
                 ordering_path: "0000000001-B".into(),
@@ -511,6 +592,40 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn indexed_cursors_bind_both_independent_revisions() {
+        let expected_scope = scope("semantic-query");
+        let position = PagePosition::Search { offset: 2 };
+        let cursor = PageCursor::issue_indexed(7, 11, expected_scope.clone(), position.clone())
+            .expect("indexed cursor");
+        assert_eq!(cursor.resume_indexed(&expected_scope, 7, 11), Ok(position));
+        assert_eq!(
+            cursor.resume_indexed(&expected_scope, 7, 12),
+            Err(PaginationError::StaleIndexCursor {
+                cursor_revision: 11,
+                current_revision: 12,
+            })
+        );
+        assert_eq!(
+            cursor
+                .resume_indexed(&expected_scope, 8, 11)
+                .expect_err("canonical mutation")
+                .code(),
+            PaginationErrorCode::StaleCursor
+        );
+
+        let lexical = PageCursor::issue(
+            7,
+            expected_scope.clone(),
+            PagePosition::Search { offset: 2 },
+        )
+        .expect("lexical cursor");
+        assert_eq!(
+            lexical.resume_indexed(&expected_scope, 7, 11),
+            Err(PaginationError::InvalidCursor)
+        );
     }
 
     #[test]

@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use axum::routing::{get, post};
 use axum::Router;
 use mdtree_core::{NodeId, NodeSelector};
+use mdtree_semantic::OllamaConfig;
 use mdtree_sqlite::SqliteStore;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
@@ -46,6 +47,17 @@ pub struct BrowseUiOptions {
     pub open_browser: bool,
     /// TCP port to bind. Port 0 asks the operating system to choose one.
     pub port: u16,
+    /// Runtime-only local embedding-provider configuration.
+    pub semantic: WebSemanticConfig,
+}
+
+/// Runtime-only Ollama configuration used by semantic web search.
+#[derive(Debug, Clone, Default)]
+pub struct WebSemanticConfig {
+    /// Ollama endpoint and timeout.
+    pub ollama: OllamaConfig,
+    /// Optional expected model; an active index may supply it when omitted.
+    pub model: Option<String>,
 }
 
 /// One workspace database to open, with an optional caller-supplied display
@@ -140,6 +152,7 @@ pub async fn run(workspaces: &[WorkspaceSource], options: BrowseUiOptions) -> an
         let (changes_tx, _) = broadcast::channel(CHANGE_CHANNEL_CAPACITY);
         workspace_states.push(WorkspaceState {
             store: Arc::new(Mutex::new(store)),
+            path: source.path.clone(),
             root,
             name,
             changes: changes_tx,
@@ -172,6 +185,7 @@ pub async fn run(workspaces: &[WorkspaceSource], options: BrowseUiOptions) -> an
         workspaces: Arc::new(workspace_states),
         shutdown: shutdown_tx.clone(),
         client_activity: Arc::new(ClientActivity::default()),
+        semantic: options.semantic,
     };
     tracing::debug!(
         credential_len = state.session_credential.len(),
@@ -201,6 +215,7 @@ pub async fn run(workspaces: &[WorkspaceSource], options: BrowseUiOptions) -> an
         .route("/vendor/easymde.min.css", get(assets::easymde_css))
         .route("/api/workspaces", get(api::workspaces))
         .route("/api/search", get(search::search))
+        .route("/api/semantic-index", get(search::semantic_status))
         .route("/api/{workspace}/node/{selector}", get(api::node))
         .route("/api/{workspace}/node/{selector}/render", get(api::render))
         .route("/api/{workspace}/node/{selector}/source", get(api::source))

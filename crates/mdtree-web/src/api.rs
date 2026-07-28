@@ -8,7 +8,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use mdtree_core::{Node, NodeId, NodeSelector, ReferenceTarget};
+use mdtree_core::{Node, NodeId, NodeSelector, ReferenceTarget, SemanticError};
 use mdtree_sqlite::{SqliteStore, StoreError};
 use serde::Serialize;
 
@@ -19,6 +19,7 @@ use crate::state::AppState;
 pub(crate) enum ApiError {
     NotFound,
     Internal(StoreError),
+    Semantic(SemanticError),
 }
 
 impl IntoResponse for ApiError {
@@ -28,7 +29,18 @@ impl IntoResponse for ApiError {
             ApiError::Internal(error) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
             }
+            ApiError::Semantic(error) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"status":"error","error":error})),
+            )
+                .into_response(),
         }
+    }
+}
+
+impl From<SemanticError> for ApiError {
+    fn from(error: SemanticError) -> Self {
+        Self::Semantic(error)
     }
 }
 

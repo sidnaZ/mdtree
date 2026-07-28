@@ -7,6 +7,7 @@ mod migrations;
 mod mutation_assembly;
 mod projection;
 mod search;
+mod semantic;
 mod snapshot;
 mod store;
 mod workspace;

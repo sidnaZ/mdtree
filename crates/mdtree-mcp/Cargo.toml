@@ -11,6 +11,7 @@ description = "Model Context Protocol adapter for MDTree"
 anyhow.workspace = true
 mdtree-core.workspace = true
 mdtree-markdown.workspace = true
+mdtree-semantic = { path = "../mdtree-semantic", version = "0.2.0" }
 mdtree-sqlite.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-io"] }
 serde = { workspace = true, features = ["derive"] }

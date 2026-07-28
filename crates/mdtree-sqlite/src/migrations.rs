@@ -1,10 +1,10 @@
 //! Ordered, embedded, transactional database migrations.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 use thiserror::Error;
 
 /// Latest schema migration understood by this executable.
-pub const LATEST_SCHEMA_VERSION: u32 = 6;
+pub const LATEST_SCHEMA_VERSION: u32 = 7;
 /// Canonical workspace data format created by this executable.
 pub const WORKSPACE_FORMAT_VERSION: u32 = 1;
 
@@ -38,6 +38,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 6,
         name: "workspace_revision",
         sql: include_str!("../migrations/0006_workspace_revision.sql"),
+    },
+    Migration {
+        version: 7,
+        name: "semantic_index",
+        sql: include_str!("../migrations/0007_semantic_index.sql"),
     },
 ];
 
@@ -91,7 +96,10 @@ fn apply_migrations(
     connection: &mut Connection,
     migrations: &[Migration],
 ) -> Result<(), MigrationError> {
-    let transaction = connection.transaction()?;
+    // Acquire the write reservation before inspecting the applied versions.
+    // Otherwise two openers can both observe the same old version from
+    // deferred transactions and one will fail while upgrading its read lock.
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
             version INTEGER PRIMARY KEY CHECK (version > 0),
@@ -140,9 +148,14 @@ fn apply_migrations(
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::{params, Connection};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
-    use super::{apply_migrations, migrate, Migration, LATEST_SCHEMA_VERSION};
+    use rusqlite::{params, Connection};
+    use tempfile::NamedTempFile;
+
+    use super::{apply_migrations, migrate, Migration, LATEST_SCHEMA_VERSION, MIGRATIONS};
+    use crate::open_connection;
 
     #[test]
     fn new_database_migrates_to_latest_version() {
@@ -183,6 +196,43 @@ mod tests {
             )
             .expect("table count");
         assert_eq!(table_count, 0);
+    }
+
+    #[test]
+    fn concurrent_openers_serialize_schema_upgrades() {
+        let file = NamedTempFile::new().expect("temporary workspace");
+        let path = file.path().to_owned();
+        let mut old_connection = open_connection(&path).expect("old connection");
+        apply_migrations(&mut old_connection, &MIGRATIONS[..6]).expect("old schema");
+        drop(old_connection);
+
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let mut connection = open_connection(&path).expect("concurrent connection");
+                    barrier.wait();
+                    migrate(&mut connection)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("migration thread")
+                .expect("serialized migration");
+        }
+
+        let connection = open_connection(&path).expect("verified connection");
+        let version: u32 = connection
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("schema version");
+        assert_eq!(version, LATEST_SCHEMA_VERSION);
     }
 
     #[test]
@@ -268,6 +318,65 @@ mod tests {
             )
             .expect("FTS match");
         assert_eq!(result, "section");
+    }
+
+    #[test]
+    fn semantic_schema_enforces_profiles_lifecycle_and_foreign_keys() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database");
+        migrate(&mut connection).expect("semantic migration should succeed");
+        insert_node(&connection, "root", None, "project").expect("root insert");
+        connection
+            .execute(
+                "INSERT INTO sections(
+                    id,node_id,start_byte,end_byte,content,content_hash,position
+                 ) VALUES ('section','root',0,1,'x',?1,0)",
+                [vec![3_u8; 32]],
+            )
+            .expect("section");
+        connection
+            .execute(
+                "INSERT INTO semantic_profiles(
+                    provider,model,dimensions,metric,input_format_version
+                 ) VALUES ('ollama','embed',3,'cosine',1)",
+                [],
+            )
+            .expect("profile");
+        connection
+            .execute(
+                "UPDATE semantic_index SET active_profile_id=1 WHERE singleton=1",
+                [],
+            )
+            .expect("activate");
+        connection
+            .execute(
+                "INSERT INTO semantic_chunks(
+                    profile_id,node_id,section_id,position,start_byte,end_byte,input,
+                    input_hash,state,embedding,updated_at
+                 ) VALUES (1,'root','section',0,0,1,'x',?1,'pending',NULL,1)",
+                [vec![4_u8; 32]],
+            )
+            .expect("pending chunk");
+        assert!(connection
+            .execute(
+                "INSERT INTO semantic_chunks(
+                    profile_id,node_id,section_id,position,start_byte,end_byte,input,
+                    input_hash,state,embedding,updated_at
+                 ) VALUES (1,'missing','section',1,0,1,'x',?1,'pending',NULL,1)",
+                [vec![5_u8; 32]],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "UPDATE semantic_chunks SET state='ready',embedding=NULL WHERE id=1",
+                [],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "UPDATE semantic_chunks SET state='failed',last_error='' WHERE id=1",
+                [],
+            )
+            .is_err());
     }
 
     fn insert_node(

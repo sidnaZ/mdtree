@@ -166,4 +166,16 @@ mod tests {
         assert!(APP_JS.contains("function applySearchHighlight(index) {"));
         assert!(STYLE_CSS.contains(".search-result-item.highlighted"));
     }
+
+    #[test]
+    fn search_exposes_modes_index_health_and_explicit_hybrid_fallback() {
+        for value in ["lexical", "semantic", "hybrid"] {
+            assert!(INDEX_HTML.contains(&format!("value=\"{value}\"")));
+        }
+        assert!(INDEX_HTML.contains("id=\"hybrid-fallback\""));
+        assert!(INDEX_HTML.contains("id=\"semantic-index-status\""));
+        assert!(APP_JS.contains("/api/semantic-index"));
+        assert!(APP_JS.contains("&hybrid_fallback=${fallback}"));
+        assert!(APP_JS.contains("renderSemanticEvidence(response);"));
+    }
 }

@@ -1,0 +1,29 @@
+[package]
+name = "mdtree-semantic"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Shared semantic indexing and Ollama embedding services for MDTree"
+
+[dependencies]
+async-trait.workspace = true
+mdtree-core.workspace = true
+mdtree-markdown.workspace = true
+mdtree-sqlite.workspace = true
+reqwest.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

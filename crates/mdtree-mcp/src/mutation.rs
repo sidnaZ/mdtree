@@ -558,7 +558,7 @@ impl MdtreeServer {
             "revision_metadata": ["author", "change_summary"],
             "mutation_tools": [
                 "initialize_workspace", "create_node", "update_node", "rename_node", "move_node", "clone_subtree", "atomic_tree_batch", "mutation_batch", "reorder_node",
-                "remove_node", "set_references", "restore_version"
+                "remove_node", "set_references", "restore_version", "semantic_index_build", "semantic_index_resume", "semantic_index_retry", "semantic_index_clear"
             ],
             "filesystem_tools": ["export_node"],
             "idempotency": "persisted_operation_receipts",

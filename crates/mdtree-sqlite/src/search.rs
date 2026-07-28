@@ -7,9 +7,10 @@ use std::str::FromStr;
 
 use crate::{SqliteStore, StoreError};
 use mdtree_core::{
-    normalize_fts_query, CursorScope, DestinationCandidate, LocateAction, LocateResult,
-    LocateStatus, Node, NodeId, NodeType, Page, PageCursor, PageLimit, PagePosition,
-    ReferenceTarget, SearchMatch, SearchRequest, SearchScope,
+    normalize_fts_query, CursorScope, DestinationCandidate, EmbeddingProfile, LocateAction,
+    LocateResult, LocateStatus, Node, NodeId, NodeType, Page, PageCursor, PageLimit, PagePosition,
+    PaginationError, ReferenceTarget, SearchMatch, SearchMode, SearchRequest, SearchScope,
+    SemanticIndexState, SemanticSearchResponse,
 };
 use rusqlite::params_from_iter;
 
@@ -35,10 +36,13 @@ impl SqliteStore {
         let status_nodes = self.status_nodes(&request.filters.statuses)?;
         let structural_nodes = self.structural_nodes(request.filters.structure)?;
         let tokens = tokens(&request.query);
-        let mut statement = self.connection().prepare(
-            "SELECT section_id,node_id,heading,content,title,aliases,summary,tags,keywords,
+        let mut statement = self
+            .connection()
+            .prepare(
+                "SELECT section_id,node_id,heading,content,title,aliases,summary,tags,keywords,
              ancestor_context,child_context FROM section_fts WHERE section_fts MATCH ?1",
-        )?;
+            )
+            .map_err(StoreError::from)?;
         let rows = statement.query_map([query], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -200,6 +204,209 @@ impl SqliteStore {
             None
         };
         Ok(Page::new(items, next_cursor))
+    }
+
+    /// Scans compatible eligible ready vectors and returns one exact semantic page.
+    pub fn search_semantic_page(
+        &self,
+        request: &SearchRequest,
+        profile: &EmbeddingProfile,
+        query_embedding: &[f32],
+        limit: PageLimit,
+        cursor: Option<&PageCursor>,
+    ) -> Result<SemanticSearchResponse, PageReadError> {
+        if request.mode != SearchMode::Semantic {
+            return Err(StoreError::InvalidData(
+                "exact semantic search requires semantic mode".into(),
+            )
+            .into());
+        }
+        request
+            .filters
+            .validate(request.scope)
+            .map_err(|message| StoreError::InvalidData(message.into()))?;
+        validate_query_embedding(profile, query_embedding)?;
+        let index = self.semantic_index_status()?;
+        if index.profile.as_ref() != Some(profile) {
+            return Err(
+                StoreError::InvalidData("active semantic profile is incompatible".into()).into(),
+            );
+        }
+        if index.coverage.state() != SemanticIndexState::Ready {
+            return Err(StoreError::InvalidData(format!(
+                "semantic index coverage is {:?}",
+                index.coverage.state()
+            ))
+            .into());
+        }
+
+        let workspace_revision = self.workspace_revision()?;
+        let index_revision = index.coverage.revision;
+        let request_key = serde_json::to_string(&(
+            &request.query,
+            request.mode,
+            request.scope,
+            &request.scope_node,
+            &request.filters,
+            profile,
+        ))
+        .map_err(|error| StoreError::InvalidData(error.to_string()))?;
+        let scope = CursorScope::new("semantic_search", request.scope_node, &request_key)?;
+        let offset = match cursor
+            .map(|value| value.resume_indexed(&scope, workspace_revision, index_revision))
+            .transpose()?
+        {
+            None => 0,
+            Some(PagePosition::Search { offset }) => offset,
+            Some(_) => return Err(PaginationError::InvalidCursorPosition.into()),
+        };
+
+        let (results, scanned_chunks) =
+            self.scan_semantic_matches(request, profile, query_embedding)?;
+        let offset_usize =
+            usize::try_from(offset).map_err(|_| StoreError::InvalidData("offset".into()))?;
+        let take =
+            usize::try_from(limit.get()).map_err(|_| StoreError::InvalidData("limit".into()))?;
+        let mut items = results
+            .into_iter()
+            .skip(offset_usize)
+            .take(take.saturating_add(1))
+            .collect::<Vec<_>>();
+        let has_more = items.len() > take;
+        if has_more {
+            items.pop();
+        }
+
+        let current_workspace_revision = self.workspace_revision()?;
+        if current_workspace_revision != workspace_revision {
+            return Err(PaginationError::StaleCursor {
+                cursor_revision: workspace_revision,
+                current_revision: current_workspace_revision,
+            }
+            .into());
+        }
+        let current_index_revision = self.semantic_index_status()?.coverage.revision;
+        if current_index_revision != index_revision {
+            return Err(PaginationError::StaleIndexCursor {
+                cursor_revision: index_revision,
+                current_revision: current_index_revision,
+            }
+            .into());
+        }
+        let next_cursor = if has_more {
+            let returned = u32::try_from(items.len())
+                .map_err(|_| StoreError::InvalidData("search page length".into()))?;
+            Some(PageCursor::issue_indexed(
+                workspace_revision,
+                index_revision,
+                scope,
+                PagePosition::Search {
+                    offset: offset.saturating_add(returned),
+                },
+            )?)
+        } else {
+            None
+        };
+        Ok(SemanticSearchResponse {
+            matches: Page::new(items, next_cursor),
+            index,
+            scanned_chunks,
+        })
+    }
+
+    fn scan_semantic_matches(
+        &self,
+        request: &SearchRequest,
+        profile: &EmbeddingProfile,
+        query_embedding: &[f32],
+    ) -> Result<(Vec<SearchMatch>, u64), StoreError> {
+        let eligible = self.eligible_nodes(request.scope, request.scope_node)?;
+        let depths = if request.filters.min_depth.is_some() || request.filters.max_depth.is_some() {
+            Some(self.relative_depths(request.scope, request.scope_node)?)
+        } else {
+            None
+        };
+        let status_nodes = self.status_nodes(&request.filters.statuses)?;
+        let structural_nodes = self.structural_nodes(request.filters.structure)?;
+        let mut filter_cache = HashMap::<NodeId, bool>::new();
+        let mut best = HashMap::<NodeId, (NodeId, u32, f64, f64)>::new();
+        let mut scanned_chunks = 0_u64;
+        let mut statement = self.connection().prepare(
+            "SELECT sc.node_id,sc.section_id,sc.position,sc.embedding
+             FROM semantic_chunks sc
+             WHERE sc.profile_id=(
+                 SELECT active_profile_id FROM semantic_index WHERE singleton=1
+             ) AND sc.state='ready'
+             ORDER BY sc.id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u32>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (node, section, position, bytes) = row?;
+            let node_id = NodeId::from_str(&node)
+                .map_err(|error| StoreError::InvalidData(error.to_string()))?;
+            if !eligible.contains(&node_id) {
+                continue;
+            }
+            let passes = if let Some(passes) = filter_cache.get(&node_id) {
+                *passes
+            } else {
+                let Some(node) = self.get(node_id)? else {
+                    continue;
+                };
+                let passes = matches_filters(
+                    &node,
+                    request,
+                    depths.as_ref(),
+                    status_nodes.as_ref(),
+                    structural_nodes.as_ref(),
+                );
+                filter_cache.insert(node_id, passes);
+                passes
+            };
+            if !passes {
+                continue;
+            }
+            let embedding = crate::semantic::decode_embedding(&bytes, profile.dimensions)
+                .ok_or_else(|| StoreError::InvalidData("invalid ready embedding".into()))?;
+            let cosine = cosine_similarity(query_embedding, &embedding)?;
+            let confidence = f64::midpoint(cosine, 1.0).clamp(0.0, 1.0);
+            let section_id = NodeId::from_str(&section)
+                .map_err(|error| StoreError::InvalidData(error.to_string()))?;
+            scanned_chunks = scanned_chunks.saturating_add(1);
+            let candidate = (section_id, position, confidence, cosine);
+            let entry = best.entry(node_id).or_insert(candidate);
+            if candidate.2.total_cmp(&entry.2).is_gt()
+                || (candidate.2.total_cmp(&entry.2).is_eq()
+                    && (candidate.0, candidate.1) < (entry.0, entry.1))
+            {
+                *entry = candidate;
+            }
+        }
+
+        let mut results = Vec::with_capacity(best.len());
+        for (node_id, (section_id, _, confidence, cosine)) in best {
+            results.push(self.search_match(
+                node_id,
+                Some(section_id),
+                confidence,
+                vec![format!("semantic cosine similarity {cosine:.6}")],
+                None,
+            )?);
+        }
+        results.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.node_id.cmp(&right.node_id))
+        });
+        Ok((results, scanned_chunks))
     }
 
     /// Ranks structural destinations using ownership and local tree conventions.
@@ -558,6 +765,56 @@ fn tokens(query: &str) -> BTreeSet<String> {
         .map(str::to_lowercase)
         .collect()
 }
+
+fn validate_query_embedding(
+    profile: &EmbeddingProfile,
+    embedding: &[f32],
+) -> Result<(), StoreError> {
+    if usize::try_from(profile.dimensions).ok() != Some(embedding.len()) {
+        return Err(StoreError::InvalidData(
+            "semantic query embedding dimensions are incompatible".into(),
+        ));
+    }
+    if embedding.iter().any(|value| !value.is_finite()) {
+        return Err(StoreError::InvalidData(
+            "semantic query embedding is non-finite".into(),
+        ));
+    }
+    if embedding.iter().all(|value| *value == 0.0) {
+        return Err(StoreError::InvalidData(
+            "semantic query embedding has zero magnitude".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> Result<f64, StoreError> {
+    let mut dot = 0.0_f64;
+    let mut left_norm = 0.0_f64;
+    let mut right_norm = 0.0_f64;
+    for (left, right) in left.iter().zip(right) {
+        let left = f64::from(*left);
+        let right = f64::from(*right);
+        dot += left * right;
+        left_norm += left * left;
+        right_norm += right * right;
+    }
+    let denominator = left_norm.sqrt() * right_norm.sqrt();
+    if denominator == 0.0 || !denominator.is_finite() {
+        return Err(StoreError::InvalidData(
+            "semantic embedding has zero or invalid magnitude".into(),
+        ));
+    }
+    let cosine = dot / denominator;
+    if cosine.is_finite() {
+        Ok(cosine.clamp(-1.0, 1.0))
+    } else {
+        Err(StoreError::InvalidData(
+            "semantic cosine similarity is non-finite".into(),
+        ))
+    }
+}
+
 fn overlap(tokens: &BTreeSet<String>, text: &str) -> f64 {
     let lower = text.to_lowercase();
     let matched = tokens
@@ -683,10 +940,12 @@ mod tests {
     use std::str::FromStr;
 
     use mdtree_core::{
-        generate_large_tree_fixture, hash_content, hash_revision, LargeTreeFixtureSpec,
-        LocateAction, LocateStatus, Node, NodeFields, NodeId, NodeMetadata, NodeRevision, NodeType,
-        PageLimit, PaginationErrorCode, ReferenceType, RevisionHashInput, SearchFilters,
-        SearchRequest, SearchScope, SequentialUlidGenerator, Slug, StructuralPredicate,
+        generate_large_tree_fixture, hash_content, hash_embedding_input, hash_revision,
+        EmbeddingMetric, EmbeddingProfile, LargeTreeFixtureSpec, LocateAction, LocateStatus, Node,
+        NodeFields, NodeId, NodeMetadata, NodeRevision, NodeType, PageLimit, PaginationErrorCode,
+        ReferenceType, RevisionHashInput, SearchFilters, SearchMode, SearchRequest, SearchScope,
+        SemanticChunk, SemanticIndexState, SequentialUlidGenerator, Slug, StructuralPredicate,
+        SEMANTIC_INPUT_FORMAT_VERSION,
     };
     use mdtree_markdown::build_derived_records;
     use tempfile::{tempdir, TempDir};
@@ -903,6 +1162,7 @@ mod tests {
     fn request(query: &str, scope: SearchScope, node: Option<NodeId>) -> SearchRequest {
         SearchRequest {
             query: query.into(),
+            mode: mdtree_core::SearchMode::Lexical,
             scope,
             scope_node: node,
             filters: SearchFilters::default(),
@@ -910,6 +1170,84 @@ mod tests {
             offset: 0,
             prefix_last_token: false,
         }
+    }
+
+    fn semantic_profile(model: &str) -> EmbeddingProfile {
+        EmbeddingProfile {
+            provider: "ollama".into(),
+            model: model.into(),
+            dimensions: 2,
+            metric: EmbeddingMetric::Cosine,
+            input_format_version: SEMANTIC_INPUT_FORMAT_VERSION,
+        }
+    }
+
+    fn seed_semantic_index(
+        store: &mut SqliteStore,
+        profile: &EmbeddingProfile,
+        preferred: NodeId,
+        secondary: NodeId,
+    ) {
+        for source in store.semantic_sources().expect("semantic sources") {
+            let mut chunks = Vec::new();
+            for section in &source.sections {
+                let input = format!(
+                    "semantic fixture {} {}",
+                    source.node.fields().metadata.title,
+                    section.position
+                );
+                chunks.push(SemanticChunk {
+                    node_id: source.node.id(),
+                    section_id: section.id,
+                    position: 0,
+                    start_byte: section.start_byte,
+                    end_byte: section.end_byte,
+                    input_hash: hash_embedding_input(profile, &input),
+                    input,
+                });
+                if source.node.id() == preferred {
+                    let input = format!("semantic fixture weaker {}", section.position);
+                    chunks.push(SemanticChunk {
+                        node_id: source.node.id(),
+                        section_id: section.id,
+                        position: 1,
+                        start_byte: section.start_byte,
+                        end_byte: section.end_byte,
+                        input_hash: hash_embedding_input(profile, &input),
+                        input,
+                    });
+                }
+            }
+            store
+                .replace_node_semantic_chunks(source.node.id(), profile, &chunks, 10)
+                .expect("semantic chunks");
+        }
+        loop {
+            let work = store
+                .claim_semantic_chunks(100, 11)
+                .expect("semantic claim");
+            if work.is_empty() {
+                break;
+            }
+            for item in work {
+                let vector = if item.node_id == preferred && item.position == 0 {
+                    [1.0, 0.0]
+                } else if item.node_id == secondary {
+                    [0.8, 0.2]
+                } else {
+                    [0.0, 1.0]
+                };
+                store
+                    .store_semantic_embedding(&item, &vector, 12)
+                    .expect("semantic vector");
+            }
+        }
+    }
+
+    fn semantic_request(query: &str, scope: SearchScope, node: Option<NodeId>) -> SearchRequest {
+        let mut request = request(query, scope, node);
+        request.mode = SearchMode::Semantic;
+        request
     }
 
     #[test]
@@ -1011,6 +1349,230 @@ mod tests {
     }
 
     #[test]
+    fn exact_semantic_search_ranks_collapses_chunks_and_explains_similarity() {
+        let mut fixture = northstar_fixture();
+        let profile = semantic_profile("fixture");
+        seed_semantic_index(
+            &mut fixture.store,
+            &profile,
+            fixture.orders,
+            fixture.create_order,
+        );
+        let request = semantic_request("purchases", SearchScope::Workspace, None);
+
+        let first = fixture
+            .store
+            .search_semantic_page(
+                &request,
+                &profile,
+                &[1.0, 0.0],
+                PageLimit::new(2).expect("limit"),
+                None,
+            )
+            .expect("semantic search");
+        let repeated = fixture
+            .store
+            .search_semantic_page(
+                &request,
+                &profile,
+                &[1.0, 0.0],
+                PageLimit::new(2).expect("limit"),
+                None,
+            )
+            .expect("repeated semantic search");
+
+        assert_eq!(first, repeated);
+        assert_eq!(first.matches.items[0].node_id, fixture.orders);
+        assert_eq!(first.matches.items[1].node_id, fixture.create_order);
+        assert_eq!(
+            first
+                .matches
+                .items
+                .iter()
+                .filter(|item| item.node_id == fixture.orders)
+                .count(),
+            1,
+            "multiple chunks must collapse to one node result"
+        );
+        assert!(first.matches.items[0].section_id.is_some());
+        assert!(first.matches.items[0]
+            .match_reasons
+            .iter()
+            .any(|reason| reason.contains("cosine similarity")));
+        assert_eq!(first.index.profile, Some(profile));
+        assert_eq!(first.index.coverage.state(), SemanticIndexState::Ready);
+    }
+
+    #[test]
+    fn semantic_eligibility_matches_metadata_structure_status_time_and_scope_filters() {
+        let mut fixture = northstar_fixture();
+        let profile = semantic_profile("filter-fixture");
+        seed_semantic_index(
+            &mut fixture.store,
+            &profile,
+            fixture.orders,
+            fixture.create_order,
+        );
+
+        let mut metadata = semantic_request("concept", SearchScope::Workspace, None);
+        metadata.filters.node_types = vec![kind("database_table"), kind("api_endpoint")];
+        metadata.filters.tags = vec!["orders".into()];
+        let results = fixture
+            .store
+            .search_semantic_page(
+                &metadata,
+                &profile,
+                &[1.0, 0.0],
+                PageLimit::new(20).expect("limit"),
+                None,
+            )
+            .expect("metadata filters");
+        assert_eq!(results.matches.items.len(), 3);
+        assert!(results.matches.items.iter().all(|item| {
+            let node = fixture
+                .store
+                .get(item.node_id)
+                .expect("node read")
+                .expect("node");
+            node.fields().metadata.tags.contains(&"orders".to_owned())
+                && matches!(
+                    node.fields()
+                        .metadata
+                        .node_type
+                        .as_ref()
+                        .map(NodeType::as_str),
+                    Some("database_table" | "api_endpoint")
+                )
+        }));
+
+        let mut structural =
+            semantic_request("concept", SearchScope::Subtree, Some(fixture.tables));
+        structural.filters.min_depth = Some(1);
+        structural.filters.max_depth = Some(1);
+        structural.filters.created_from = Some(1);
+        structural.filters.created_to = Some(1);
+        structural.filters.updated_from = Some(1);
+        structural.filters.updated_to = Some(1);
+        structural.filters.structure = Some(StructuralPredicate::Leaf);
+        let results = fixture
+            .store
+            .search_semantic_page(
+                &structural,
+                &profile,
+                &[1.0, 0.0],
+                PageLimit::new(20).expect("limit"),
+                None,
+            )
+            .expect("structural filters");
+        assert!(results.matches.items.iter().all(|item| fixture
+            .store
+            .parent(item.node_id)
+            .expect("parent")
+            .is_some()));
+        assert!(!results.matches.items.is_empty());
+
+        let mut status = semantic_request("concept", SearchScope::Workspace, None);
+        status.filters.statuses = vec![ReferenceType::from_str("reads_from").expect("status")];
+        let results = fixture
+            .store
+            .search_semantic_page(
+                &status,
+                &profile,
+                &[1.0, 0.0],
+                PageLimit::new(20).expect("limit"),
+                None,
+            )
+            .expect("status filter");
+        assert_eq!(
+            results
+                .matches
+                .items
+                .iter()
+                .map(|item| item.node_id)
+                .collect::<Vec<_>>(),
+            vec![fixture.create_order]
+        );
+
+        let current = fixture
+            .store
+            .search_semantic_page(
+                &semantic_request("concept", SearchScope::CurrentNode, Some(fixture.orders)),
+                &profile,
+                &[1.0, 0.0],
+                PageLimit::new(20).expect("limit"),
+                None,
+            )
+            .expect("current scope");
+        assert_eq!(current.scanned_chunks, 2);
+        assert_eq!(current.matches.items.len(), 1);
+    }
+
+    #[test]
+    fn semantic_cursor_binds_query_profile_and_index_revision() {
+        let mut fixture = northstar_fixture();
+        let profile = semantic_profile("cursor-fixture");
+        seed_semantic_index(
+            &mut fixture.store,
+            &profile,
+            fixture.orders,
+            fixture.create_order,
+        );
+        let request = semantic_request("concept", SearchScope::Workspace, None);
+        let first = fixture
+            .store
+            .search_semantic_page(
+                &request,
+                &profile,
+                &[1.0, 0.0],
+                PageLimit::new(1).expect("limit"),
+                None,
+            )
+            .expect("first page");
+        let cursor = first.matches.next_cursor.expect("continuation");
+
+        let changed_query = semantic_request("different concept", SearchScope::Workspace, None);
+        let error = fixture
+            .store
+            .search_semantic_page(
+                &changed_query,
+                &profile,
+                &[1.0, 0.0],
+                PageLimit::new(1).expect("limit"),
+                Some(&cursor),
+            )
+            .expect_err("query-bound cursor");
+        assert_eq!(
+            error.pagination_code(),
+            Some(PaginationErrorCode::InvalidCursor)
+        );
+
+        fixture
+            .store
+            .connection()
+            .execute(
+                "UPDATE semantic_chunks SET updated_at=updated_at+1 WHERE id=(
+                    SELECT MIN(id) FROM semantic_chunks
+                 )",
+                [],
+            )
+            .expect("index mutation");
+        let error = fixture
+            .store
+            .search_semantic_page(
+                &request,
+                &profile,
+                &[1.0, 0.0],
+                PageLimit::new(1).expect("limit"),
+                Some(&cursor),
+            )
+            .expect_err("stale semantic cursor");
+        assert_eq!(
+            error.pagination_code(),
+            Some(PaginationErrorCode::StaleCursor)
+        );
+    }
+
+    #[test]
     fn paged_search_enumerates_large_tied_rankings_and_binds_the_request() {
         let directory = tempdir().expect("tempdir");
         let path = directory.path().join("search-pages.mdtree");
@@ -1088,6 +1650,53 @@ mod tests {
             error.pagination_code(),
             Some(PaginationErrorCode::InvalidCursor)
         );
+    }
+
+    #[test]
+    fn exact_scan_counts_only_eligible_chunks_on_a_wide_fixture() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("semantic-wide.mdtree");
+        let fixture = generate_large_tree_fixture(
+            LargeTreeFixtureSpec {
+                wide_children: 230,
+                deep_descendants: 25,
+                history_revisions: 1,
+                relations: 0,
+                response_boundary_bytes: 256,
+            },
+            1_337,
+        );
+        crate::import_snapshot_new(&path, &fixture.snapshot).expect("fixture import");
+        let mut store = SqliteStore::open(&path).expect("store");
+        let profile = semantic_profile("wide-fixture");
+        seed_semantic_index(
+            &mut store,
+            &profile,
+            fixture.wide_child_ids[0],
+            fixture.wide_child_ids[1],
+        );
+        let total = store
+            .semantic_index_status()
+            .expect("semantic status")
+            .coverage
+            .total;
+        assert!(total > 230);
+
+        let response = store
+            .search_semantic_page(
+                &semantic_request(
+                    "concept",
+                    SearchScope::CurrentNode,
+                    Some(fixture.wide_child_ids[0]),
+                ),
+                &profile,
+                &[1.0, 0.0],
+                PageLimit::new(10).expect("limit"),
+                None,
+            )
+            .expect("bounded eligible scan");
+        assert_eq!(response.scanned_chunks, 2);
+        assert_eq!(response.matches.items.len(), 1);
     }
 
     #[test]

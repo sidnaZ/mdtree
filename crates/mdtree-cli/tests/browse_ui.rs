@@ -103,6 +103,24 @@ fn browse_ui_returns_after_starting_a_background_server_and_prints_only_its_url(
     assert!(socket.is_ipv4(), "{url}");
     assert_eq!(socket.port(), port);
 
+    let (status, body) = http_get(address, "/api/semantic-index", None);
+    assert_eq!(status, 200);
+    let semantic_status: serde_json::Value =
+        serde_json::from_str(&body).expect("semantic status JSON");
+    assert_eq!(semantic_status["provider"], "ollama");
+    assert_eq!(semantic_status["workspaces"][0]["state"], "empty");
+
+    let (status, body) = http_get(address, "/api/search?q=Example&mode=lexical", None);
+    assert_eq!(status, 200);
+    let lexical: serde_json::Value = serde_json::from_str(&body).expect("lexical search JSON");
+    assert_eq!(lexical["mode"], "lexical");
+    assert_eq!(lexical["matches"][0]["title"], "Example");
+
+    let (status, body) = http_get(address, "/api/search?q=Example&mode=semantic", None);
+    assert_eq!(status, 503);
+    let unavailable: serde_json::Value = serde_json::from_str(&body).expect("semantic error JSON");
+    assert_eq!(unavailable["error"]["code"], "not_configured");
+
     let credential = session_credential(address);
     assert_eq!(http_post(address, "/api/stop", Some(&credential)), 202);
 }
@@ -1784,6 +1802,35 @@ async fn browse_ui_websocket_create_node_command_honors_an_explicit_slug_and_rej
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+    async fn send_and_recv(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        id: &str,
+        payload: serde_json::Value,
+    ) -> serde_json::Value {
+        let command = serde_json::json!({
+            "v": 1,
+            "id": id,
+            "session": "test",
+            "type": "command",
+            "payload": payload,
+        });
+        socket
+            .send(WsMessage::Text(command.to_string().into()))
+            .await
+            .expect("send command");
+        let response = socket
+            .next()
+            .await
+            .expect("response")
+            .expect("no websocket error");
+        let WsMessage::Text(text) = response else {
+            panic!("expected a text frame");
+        };
+        serde_json::from_str(&text).expect("envelope JSON")
+    }
+
     let directory = tempdir().expect("tempdir");
     let init = mdtree()
         .current_dir(directory.path())
@@ -1825,35 +1872,6 @@ async fn browse_ui_websocket_create_node_command_honors_an_explicit_slug_and_rej
         .await
         .expect("init message")
         .expect("no websocket error"); // init
-
-    async fn send_and_recv(
-        socket: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        id: &str,
-        payload: serde_json::Value,
-    ) -> serde_json::Value {
-        let command = serde_json::json!({
-            "v": 1,
-            "id": id,
-            "session": "test",
-            "type": "command",
-            "payload": payload,
-        });
-        socket
-            .send(WsMessage::Text(command.to_string().into()))
-            .await
-            .expect("send command");
-        let response = socket
-            .next()
-            .await
-            .expect("response")
-            .expect("no websocket error");
-        let WsMessage::Text(text) = response else {
-            panic!("expected a text frame");
-        };
-        serde_json::from_str(&text).expect("envelope JSON")
-    }
 
     // An explicit slug that doesn't match the title is honored verbatim.
     let envelope = send_and_recv(

@@ -17,6 +17,7 @@ mod records;
 mod revision_diff;
 mod scale_fixture;
 mod search;
+mod semantic;
 mod slug_generation;
 mod snapshot;
 mod subtree_diff;
@@ -28,7 +29,7 @@ pub use context::{
 pub use error::{ApplicationError, DomainError, ErrorCode, ErrorReport};
 pub use example_fixtures::developer_workspace_snapshot;
 pub use fixture::northstar_platform_snapshot;
-pub use hashing::{hash_content, hash_revision, RevisionHashInput};
+pub use hashing::{hash_content, hash_embedding_input, hash_revision, RevisionHashInput};
 pub use identity::{Breadcrumb, NodeId, NodeSelector, Slug};
 pub use metadata::{NodeMetadata, NodeType};
 pub use node::{Node, NodeFields, NodeHash};
@@ -61,6 +62,12 @@ pub use scale_fixture::{
 pub use search::{
     normalize_fts_query, DestinationCandidate, LocateAction, LocateResult, LocateStatus,
     SearchFilters, SearchMatch, SearchRequest, SearchScope,
+};
+pub use semantic::{
+    EmbeddingMetric, EmbeddingProfile, HybridSearchResponse, SearchMode, SemanticChunk,
+    SemanticChunkState, SemanticChunkWork, SemanticError, SemanticErrorCode, SemanticIndexCoverage,
+    SemanticIndexState, SemanticIndexStatus, SemanticSearchResponse, SemanticSource,
+    SemanticWriteOutcome, SEMANTIC_INPUT_FORMAT_VERSION,
 };
 pub use slug_generation::{generate_slug, slug_for_rename, RenameSlugPolicy};
 pub use snapshot::{

@@ -117,6 +117,7 @@ fn navigation_references_search_location_and_context_match_specification() {
     let results = store
         .search_content(&SearchRequest {
             query: "domain events kafka".into(),
+            mode: mdtree_core::SearchMode::Lexical,
             scope: SearchScope::Workspace,
             scope_node: None,
             filters: SearchFilters::default(),
