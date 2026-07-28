@@ -3,7 +3,8 @@
 MDTree is a local-first knowledge base for structured tree data. Humans explore
 it visually, AI agents work with it through MCP, and computer systems integrate
 with it through the CLI or an API—all against the same portable `.mdtree`
-workspace.
+workspace. Search is lexical by default, with optional local Ollama-backed
+semantic search and a hybrid mode.
 
 ![MDTree browser showing a structured project tree](browser.png)
 
