@@ -202,10 +202,11 @@ async function loadNode(workspaceId, id) {
 }
 
 // Relation types are free-text (not a fixed enum — see the spec's typed
-// references), so most colors are assigned the first time each is seen and
-// stay stable for the rest of the session, cycling through the palette if
-// there happen to be more distinct types than colors. A few conventional
-// names get a fixed, meaningful color instead of whatever's next in line.
+// references). Conventional workflow names get a meaningful color; every
+// other name is hashed into this fixed palette. Keep the palette's order and
+// length stable: together with `stableRelationHash`, it is the contract that
+// makes an arbitrary relation retain its color across sessions, workspaces,
+// and discovery orders.
 const RELATION_COLOR_PALETTE = [
   "bg-amber-400",
   "bg-sky-400",
@@ -218,19 +219,86 @@ const RELATION_COLOR_PALETTE = [
 ];
 const FIXED_RELATION_COLORS = {
   done: "bg-green-500",
+  complete: "bg-green-500",
+  completed: "bg-green-500",
+  success: "bg-green-500",
+  succeeded: "bg-green-500",
+  resolved: "bg-green-500",
+  fixed: "bg-green-500",
+  passed: "bg-green-500",
+  approved: "bg-green-500",
   error: "bg-red-500",
-  "in-progress": "bg-blue-500",
-  "in progress": "bg-blue-500",
+  failed: "bg-red-500",
+  failure: "bg-red-500",
+  fatal: "bg-red-500",
+  rejected: "bg-red-500",
+  "in progress": "bg-orange-500",
+  wip: "bg-orange-500",
+  active: "bg-orange-500",
+  ongoing: "bg-orange-500",
+  running: "bg-orange-500",
+  working: "bg-orange-500",
+  blocked: "bg-rose-500",
+  blocker: "bg-rose-500",
+  stalled: "bg-rose-500",
+  impeded: "bg-rose-500",
+  warning: "bg-amber-500",
+  caution: "bg-amber-500",
+  "at risk": "bg-amber-500",
+  pending: "bg-sky-500",
+  waiting: "bg-sky-500",
+  queued: "bg-sky-500",
+  planned: "bg-sky-500",
+  todo: "bg-sky-500",
+  "to do": "bg-sky-500",
+  backlog: "bg-sky-500",
+  open: "bg-sky-500",
+  cancelled: "bg-slate-500",
+  canceled: "bg-slate-500",
+  skipped: "bg-slate-500",
+  ignored: "bg-slate-500",
+  deprecated: "bg-slate-500",
+  archived: "bg-slate-500",
+  info: "bg-cyan-400",
+  information: "bg-cyan-400",
+  note: "bg-cyan-400",
 };
+
+// Color matching is deliberately more forgiving than relation identity.
+// The server and legend retain the author's original text, while spellings
+// such as `Done`, ` done `, `in-progress`, and `in_progress` calculate from
+// the same canonical value.
+function normalizeRelationType(type) {
+  return type.normalize("NFKC").trim().toLowerCase().replace(/[\s_-]+/g, " ");
+}
+
+// FNV-1a with explicit 32-bit multiplication. Iterating Unicode code points
+// avoids splitting non-BMP characters into surrogate halves, and Math.imul
+// keeps the result identical on every JavaScript engine.
+function stableRelationHash(type) {
+  let hash = 0x811c9dc5;
+  for (const character of type) {
+    hash ^= character.codePointAt(0);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+function calculateRelationColor(type) {
+  const normalized = normalizeRelationType(type);
+  const fixed = Object.hasOwn(FIXED_RELATION_COLORS, normalized)
+    ? FIXED_RELATION_COLORS[normalized]
+    : null;
+  return (
+    fixed ??
+    RELATION_COLOR_PALETTE[stableRelationHash(normalized) % RELATION_COLOR_PALETTE.length]
+  );
+}
 
 function colorForRelation(workspaceState, type) {
   const relationColors = workspaceState.relationColors;
   if (!relationColors.has(type)) {
-    const fixed = FIXED_RELATION_COLORS[type.toLowerCase()];
-    relationColors.set(
-      type,
-      fixed ?? RELATION_COLOR_PALETTE[relationColors.size % RELATION_COLOR_PALETTE.length],
-    );
+    relationColors.set(type, calculateRelationColor(type));
   }
   return relationColors.get(type);
 }

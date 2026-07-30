@@ -118,6 +118,23 @@ mod tests {
     }
 
     #[test]
+    fn relation_colors_are_semantic_normalized_and_independent_of_discovery_order() {
+        assert!(APP_JS.contains("function normalizeRelationType(type) {"));
+        assert!(APP_JS.contains(".normalize(\"NFKC\").trim().toLowerCase()"));
+        assert!(APP_JS.contains("replace(/[\\s_-]+/g, \" \")"));
+        assert!(APP_JS.contains("done: \"bg-green-500\""));
+        assert!(APP_JS.contains("\"in progress\": \"bg-orange-500\""));
+        assert!(APP_JS.contains("error: \"bg-red-500\""));
+        assert!(APP_JS.contains("function stableRelationHash(type) {"));
+        assert!(APP_JS.contains("Math.imul(hash, 0x01000193)"));
+        assert!(APP_JS.contains("relationColors.set(type, calculateRelationColor(type));"));
+        assert!(
+            !APP_JS.contains("relationColors.size % RELATION_COLOR_PALETTE.length"),
+            "a relation's color must not depend on how many other types were discovered first"
+        );
+    }
+
+    #[test]
     fn arrow_right_opens_a_closed_node_with_children_instead_of_doing_nothing() {
         assert!(APP_JS.contains("else if (summaryForNode(current)?.children_count > 0) {"));
     }
