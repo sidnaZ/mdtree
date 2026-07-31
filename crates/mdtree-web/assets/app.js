@@ -375,6 +375,10 @@ async function init() {
       id: summary.id,
       name: summary.name,
       root: summary.root,
+      // Suggested values for the metadata editor's node-type fields (see
+      // currentWorkspaceNodeTypes) — a workspace-wide scan, same rationale as
+      // relation_types above: available before any specific node is loaded.
+      nodeTypes: summary.node_types,
       state: workspaceState,
       socket: null,
       reconnectAttempt: 0,
@@ -2806,6 +2810,596 @@ function createMarkdownEditor(textarea, initialValue) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Metadata editor: a Normal (per-field form) and Raw (plain JSON) view onto
+// the same NodeMetadata, matching the wire shape crates/mdtree-core's
+// NodeMetadata serializes to/from — title is deliberately never shown here
+// (renaming is its own dedicated flow, and the server ignores/overwrites it
+// on save regardless — see update_node in commands.rs). Any top-level key
+// this app doesn't otherwise know about is treated as an "extension" and
+// round-tripped through the generic JSON-tree editor rather than being
+// silently dropped.
+// ---------------------------------------------------------------------------
+
+const METADATA_KNOWN_KEYS = new Set([
+  "title", "summary", "aliases", "node_type", "keywords",
+  "accepts_children", "owns", "excludes", "tags",
+]);
+
+// Every metadata list field, in the same order NodeMetadata serializes them
+// — kept in one place so the chip-input wiring, the model<->JSON conversion,
+// and the raw-JSON key order all agree without repeating the list four times.
+const METADATA_LIST_FIELDS = [
+  "aliases", "keywords", "accepts_children", "owns", "excludes", "tags",
+];
+
+// Parses a Raw-mode JSON string into the in-memory metadata model. Only
+// rejects what genuinely cannot be represented (unparsable JSON, a non-object
+// root, or a list field that isn't an array of strings) — everything else is
+// accepted as-is, since the server is the authoritative validator on Save;
+// this just has to avoid silently losing or corrupting what the user typed.
+function parseMetadataModel(rawText) {
+  let json;
+  try {
+    json = JSON.parse(rawText);
+  } catch (error) {
+    return { error: `Invalid JSON: ${error.message}` };
+  }
+  if (json === null || typeof json !== "object" || Array.isArray(json)) {
+    return { error: "Metadata must be a JSON object." };
+  }
+  try {
+    const stringArray = (key) => {
+      if (json[key] === undefined) {
+        return [];
+      }
+      if (!Array.isArray(json[key]) || !json[key].every((value) => typeof value === "string")) {
+        throw new Error(`"${key}" must be an array of strings.`);
+      }
+      return json[key];
+    };
+    const model = {
+      summary: json.summary == null ? "" : String(json.summary),
+      node_type: json.node_type == null ? "" : String(json.node_type),
+      extensions: {},
+    };
+    for (const key of METADATA_LIST_FIELDS) {
+      model[key] = stringArray(key);
+    }
+    for (const [key, value] of Object.entries(json)) {
+      if (!METADATA_KNOWN_KEYS.has(key)) {
+        model.extensions[key] = value;
+      }
+    }
+    return { model };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+// Builds the wire-shape JSON object (matching NodeMetadata's own field order)
+// from the in-memory model. Empty/blank fields are omitted entirely, mirroring
+// NodeMetadata's `skip_serializing_if` — so, e.g., clearing every alias
+// removes the key rather than saving `"aliases": []`.
+function metadataModelToJson(model) {
+  const json = {};
+  if (model.summary) {
+    json.summary = model.summary;
+  }
+  if (model.aliases.length) {
+    json.aliases = model.aliases;
+  }
+  if (model.node_type) {
+    json.node_type = model.node_type;
+  }
+  if (model.keywords.length) {
+    json.keywords = model.keywords;
+  }
+  if (model.accepts_children.length) {
+    json.accepts_children = model.accepts_children;
+  }
+  if (model.owns.length) {
+    json.owns = model.owns;
+  }
+  if (model.excludes.length) {
+    json.excludes = model.excludes;
+  }
+  if (model.tags.length) {
+    json.tags = model.tags;
+  }
+  for (const [key, value] of Object.entries(model.extensions)) {
+    json[key] = value;
+  }
+  return json;
+}
+
+function metadataModelFromJson(json) {
+  const { model, error } = parseMetadataModel(JSON.stringify(json ?? {}));
+  // `json` here always comes from the server's own NodeMetadata serialization
+  // (see the `source` endpoint), never from user typing, so re-parsing it can
+  // only fail if the server and client schemas have drifted — surfacing that
+  // as an empty model is safer than throwing and leaving the editor unusable.
+  if (error) {
+    return {
+      summary: "", node_type: "", extensions: {},
+      aliases: [], keywords: [], accepts_children: [], owns: [], excludes: [], tags: [],
+    };
+  }
+  return model;
+}
+
+// A removable-chip text input for one string-array metadata field (aliases,
+// keywords, tags, owns, excludes, accepts_children). Enter/comma or losing
+// focus commits the current text as a new chip; Backspace on an empty input
+// pops the last chip — no separate "remove all" control needed since chips
+// are few enough to remove one at a time.
+function createChipInput(container, { initialValues = [], placeholder = "", listId = null } = {}) {
+  container.innerHTML = "";
+  container.classList.add("chip-input-box");
+  let values = [...initialValues];
+
+  const chipsEl = document.createElement("div");
+  chipsEl.className = "chip-input-chips";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.placeholder = placeholder;
+  input.className = "chip-input-field";
+  if (listId) {
+    input.setAttribute("list", listId);
+  }
+
+  function renderChips() {
+    chipsEl.innerHTML = "";
+    values.forEach((value, index) => {
+      const chip = document.createElement("span");
+      chip.className = "chip-input-chip";
+      const label = document.createElement("span");
+      label.className = "chip-input-chip-label";
+      label.textContent = value;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "chip-input-chip-remove";
+      remove.setAttribute("aria-label", `Remove ${value}`);
+      remove.textContent = "×";
+      remove.addEventListener("click", () => {
+        values.splice(index, 1);
+        renderChips();
+      });
+      chip.append(label, remove);
+      chipsEl.appendChild(chip);
+    });
+  }
+
+  function commitPendingInput() {
+    const value = input.value.trim();
+    input.value = "";
+    if (value && !values.includes(value)) {
+      values.push(value);
+      renderChips();
+    }
+  }
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === ",") {
+      event.preventDefault();
+      commitPendingInput();
+    } else if (event.key === "Backspace" && input.value === "" && values.length) {
+      values.pop();
+      renderChips();
+    }
+  });
+  input.addEventListener("blur", commitPendingInput);
+
+  renderChips();
+  chipsEl.appendChild(input);
+  container.appendChild(chipsEl);
+
+  return {
+    getValues: () => {
+      const pending = input.value.trim();
+      return pending && !values.includes(pending) ? [...values, pending] : [...values];
+    },
+  };
+}
+
+// Recursive editor for one arbitrary JSON value (string/number/boolean/null/
+// object/array), used for extension fields whose shape this app has no
+// schema for. `onChange` fires with the new value on every edit, including a
+// type swap; `mount` always ends up holding exactly this value's editor.
+const JSON_VALUE_TYPES = ["string", "number", "boolean", "object", "array", "null"];
+
+function defaultValueForJsonType(type) {
+  switch (type) {
+    case "number": return 0;
+    case "boolean": return false;
+    case "object": return {};
+    case "array": return [];
+    case "null": return null;
+    default: return "";
+  }
+}
+
+function typeOfJsonValue(value) {
+  if (value === null) {
+    return "null";
+  }
+  if (Array.isArray(value)) {
+    return "array";
+  }
+  return typeof value;
+}
+
+// `mount` stacks two blocks vertically (see .json-tree-value-mount): a
+// `line` holding the type selector plus, for a scalar, its input on the same
+// row — and a `nested` block below it that only ever holds an object/array's
+// own indented rows. Keeping the recursive container out of the same flex
+// row as the type selector is deliberate: putting them side by side (as an
+// earlier version did) let each nesting level push the next one further
+// right instead of down, so a handful of levels already ran the whole
+// editor off the right edge of the panel.
+function mountJsonValueEditor(mount, initialValue, onChange) {
+  let current = initialValue;
+  const typeSelect = document.createElement("select");
+  typeSelect.className = "json-tree-type-select";
+  for (const type of JSON_VALUE_TYPES) {
+    const option = document.createElement("option");
+    option.value = type;
+    option.textContent = type;
+    typeSelect.appendChild(option);
+  }
+  typeSelect.value = typeOfJsonValue(current);
+
+  const line = document.createElement("div");
+  line.className = "json-tree-value-line";
+  const scalarSlot = document.createElement("div");
+  scalarSlot.className = "json-tree-value-slot";
+  line.append(typeSelect, scalarSlot);
+  const nested = document.createElement("div");
+
+  function renderSlot() {
+    scalarSlot.innerHTML = "";
+    nested.innerHTML = "";
+    const type = typeSelect.value;
+    if (type === "string") {
+      const input = document.createElement("input");
+      input.type = "text";
+      input.className = "json-tree-scalar-input";
+      input.value = typeof current === "string" ? current : "";
+      input.addEventListener("input", () => {
+        current = input.value;
+        onChange(current);
+      });
+      scalarSlot.appendChild(input);
+    } else if (type === "number") {
+      const input = document.createElement("input");
+      input.type = "number";
+      input.className = "json-tree-scalar-input";
+      input.value = typeof current === "number" ? current : 0;
+      input.addEventListener("input", () => {
+        current = input.value === "" ? 0 : Number(input.value);
+        onChange(current);
+      });
+      scalarSlot.appendChild(input);
+    } else if (type === "boolean") {
+      const select = document.createElement("select");
+      select.className = "json-tree-scalar-input";
+      for (const value of ["true", "false"]) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value;
+        select.appendChild(option);
+      }
+      select.value = current === true ? "true" : "false";
+      select.addEventListener("change", () => {
+        current = select.value === "true";
+        onChange(current);
+      });
+      scalarSlot.appendChild(select);
+    } else if (type === "null") {
+      const label = document.createElement("span");
+      label.className = "json-tree-null-label";
+      label.textContent = "null";
+      scalarSlot.appendChild(label);
+    } else if (type === "object") {
+      const seed = current && typeof current === "object" && !Array.isArray(current) ? current : {};
+      mountJsonObjectEditor(nested, seed, (value) => {
+        current = value;
+        onChange(current);
+      });
+    } else if (type === "array") {
+      mountJsonArrayEditor(nested, Array.isArray(current) ? current : [], (value) => {
+        current = value;
+        onChange(current);
+      });
+    }
+  }
+
+  typeSelect.addEventListener("change", () => {
+    current = defaultValueForJsonType(typeSelect.value);
+    renderSlot();
+    onChange(current);
+  });
+
+  mount.append(line, nested);
+  renderSlot();
+  return { getValue: () => current };
+}
+
+function mountJsonContainerEditor(mount, entries, { addLabel, keyed, onChange }) {
+  const rowsEl = document.createElement("div");
+  rowsEl.className = "json-tree-rows";
+  mount.appendChild(rowsEl);
+
+  function emit() {
+    if (keyed) {
+      const result = {};
+      for (const entry of entries) {
+        const key = entry.key.trim();
+        if (key) {
+          result[key] = entry.handle.getValue();
+        }
+      }
+      onChange(result);
+    } else {
+      onChange(entries.map((entry) => entry.handle.getValue()));
+    }
+  }
+
+  function renderRow(entry) {
+    const row = document.createElement("div");
+    row.className = "json-tree-row";
+    if (keyed) {
+      const keyInput = document.createElement("input");
+      keyInput.type = "text";
+      keyInput.placeholder = "key";
+      keyInput.className = "json-tree-key-input";
+      keyInput.value = entry.key;
+      keyInput.addEventListener("input", () => {
+        entry.key = keyInput.value;
+        emit();
+      });
+      row.appendChild(keyInput);
+    }
+    const valueMount = document.createElement("div");
+    valueMount.className = "json-tree-value-mount";
+    row.appendChild(valueMount);
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.className = "json-tree-remove-btn";
+    removeButton.setAttribute("aria-label", "Remove");
+    removeButton.textContent = "×";
+    removeButton.addEventListener("click", () => {
+      entries.splice(entries.indexOf(entry), 1);
+      row.remove();
+      emit();
+    });
+    row.appendChild(removeButton);
+    rowsEl.appendChild(row);
+    entry.handle = mountJsonValueEditor(valueMount, entry.value, emit);
+  }
+
+  entries.forEach(renderRow);
+
+  const addButton = document.createElement("button");
+  addButton.type = "button";
+  addButton.className = "json-tree-add-btn";
+  addButton.textContent = addLabel;
+  addButton.addEventListener("click", () => {
+    const entry = keyed ? { key: "", value: "" } : { value: "" };
+    entries.push(entry);
+    renderRow(entry);
+    emit();
+  });
+  mount.appendChild(addButton);
+  // No initial emit() here: `entries` (and thus `current` in every ancestor
+  // mountJsonValueEditor up the tree) already equals the value this was
+  // seeded with, unedited. Firing one anyway would walk back up through
+  // ancestors still in the middle of their own `entries.forEach(renderRow)`
+  // — a sibling further down that array whose `entry.handle` isn't assigned
+  // yet — and crash on `entry.handle.getValue()`. A real edit only ever
+  // happens after construction fully finishes, so every handle exists by
+  // the time `emit()` is reachable from a live listener.
+}
+
+function mountJsonObjectEditor(mount, obj, onChange) {
+  const entries = Object.entries(obj).map(([key, value]) => ({ key, value }));
+  mountJsonContainerEditor(mount, entries, { addLabel: "+ Add field", keyed: true, onChange });
+}
+
+function mountJsonArrayEditor(mount, arr, onChange) {
+  const entries = arr.map((value) => ({ value }));
+  mountJsonContainerEditor(mount, entries, { addLabel: "+ Add item", keyed: false, onChange });
+}
+
+// The root of the "Custom fields" editor is always a plain object (the
+// NodeMetadata `extensions` map) — unlike a nested value, it has no type
+// selector of its own, just key/value rows.
+function createExtensionsEditor(container, initialValue) {
+  container.innerHTML = "";
+  let value = initialValue && typeof initialValue === "object" && !Array.isArray(initialValue)
+    ? initialValue
+    : {};
+  mountJsonObjectEditor(container, value, (updated) => {
+    value = updated;
+  });
+  return { getValue: () => value };
+}
+
+// Live handles for whichever fields are currently mounted in Normal mode —
+// null while Raw mode is showing instead (its own state just lives in the
+// textarea, nothing to hold a handle to).
+let metadataFieldHandles = null;
+// "normal" or "raw" — which of the two metadata sub-views is visible.
+let metadataEditorMode = "normal";
+// The node's title at the moment editing began. Never shown or editable in
+// either metadata view (renaming is its own dedicated flow, and the server
+// force-overwrites whatever title a save's metadata carries anyway — see
+// update_node in commands.rs) — kept only so the save payload's `metadata`
+// still deserializes into NodeMetadata, whose `title` field is mandatory.
+let metadataOriginalTitle = "";
+
+function renderMetadataNormalMode(model, nodeTypes) {
+  document.getElementById("metadata-field-summary").value = model.summary;
+  document.getElementById("metadata-field-node-type").value = model.node_type;
+  const datalist = document.getElementById("metadata-node-type-list");
+  datalist.innerHTML = "";
+  for (const type of nodeTypes) {
+    const option = document.createElement("option");
+    option.value = type;
+    datalist.appendChild(option);
+  }
+  metadataFieldHandles = {
+    aliases: createChipInput(document.getElementById("metadata-field-aliases"), {
+      initialValues: model.aliases,
+      placeholder: "Add alias…",
+    }),
+    keywords: createChipInput(document.getElementById("metadata-field-keywords"), {
+      initialValues: model.keywords,
+      placeholder: "Add keyword…",
+    }),
+    tags: createChipInput(document.getElementById("metadata-field-tags"), {
+      initialValues: model.tags,
+      placeholder: "Add tag…",
+    }),
+    accepts_children: createChipInput(document.getElementById("metadata-field-accepts-children"), {
+      initialValues: model.accepts_children,
+      placeholder: "Add node type…",
+      listId: "metadata-node-type-list",
+    }),
+    owns: createChipInput(document.getElementById("metadata-field-owns"), {
+      initialValues: model.owns,
+      placeholder: "Add concept…",
+    }),
+    excludes: createChipInput(document.getElementById("metadata-field-excludes"), {
+      initialValues: model.excludes,
+      placeholder: "Add concept…",
+    }),
+  };
+  metadataExtensionsHandle = createExtensionsEditor(
+    document.getElementById("metadata-field-extensions"),
+    model.extensions,
+  );
+
+  const extensionCount = Object.keys(model.extensions).length;
+  const badge = document.getElementById("metadata-section-custom-count");
+  badge.textContent = String(extensionCount);
+  badge.hidden = extensionCount === 0;
+  // Starts open only when there's already something in it — an empty
+  // section stays collapsed so it doesn't compete for attention with Main
+  // fields, which is what a caller almost always came here to edit.
+  document.getElementById("metadata-section-custom").open = extensionCount > 0;
+}
+
+// Handle for the extensions tree editor — kept separate from
+// `metadataFieldHandles` since it, unlike the chip inputs, exists in both
+// modes' underlying model the same way but is only ever rendered in Normal.
+let metadataExtensionsHandle = null;
+
+// Reads the currently-mounted Normal-mode fields back into a model object.
+function collectMetadataModelFromNormalMode() {
+  const model = {
+    summary: document.getElementById("metadata-field-summary").value.trim(),
+    node_type: document.getElementById("metadata-field-node-type").value.trim(),
+    extensions: metadataExtensionsHandle ? metadataExtensionsHandle.getValue() : {},
+  };
+  for (const key of METADATA_LIST_FIELDS) {
+    model[key] = metadataFieldHandles[key].getValues();
+  }
+  return model;
+}
+
+function setMetadataRawText(model) {
+  document.getElementById("metadata-raw-textarea").value =
+    JSON.stringify(metadataModelToJson(model), null, 2);
+}
+
+function showMetadataRawError(message) {
+  const error = document.getElementById("metadata-raw-error");
+  error.textContent = message;
+  error.hidden = !message;
+}
+
+// Switches between the Normal and Raw metadata sub-views, pushing whichever
+// view is being left into the other so neither can silently go stale. A
+// Raw -> Normal switch that fails to parse stays on Raw with an inline error
+// instead of losing what the user typed.
+function switchMetadataMode(mode) {
+  if (mode === metadataEditorMode) {
+    return;
+  }
+  if (mode === "raw") {
+    setMetadataRawText(collectMetadataModelFromNormalMode());
+    showMetadataRawError("");
+  } else {
+    const { model, error } = parseMetadataModel(
+      document.getElementById("metadata-raw-textarea").value,
+    );
+    if (error) {
+      showMetadataRawError(error);
+      return;
+    }
+    showMetadataRawError("");
+    renderMetadataNormalMode(model, currentWorkspaceNodeTypes());
+  }
+  metadataEditorMode = mode;
+  document.getElementById("metadata-mode-normal").classList.toggle("active", mode === "normal");
+  document.getElementById("metadata-mode-raw").classList.toggle("active", mode === "raw");
+  document.getElementById("metadata-normal-panel").classList.toggle("hidden", mode !== "normal");
+  document.getElementById("metadata-raw-panel").classList.toggle("hidden", mode !== "raw");
+  document.getElementById("metadata-raw-panel").classList.toggle("flex", mode === "raw");
+}
+
+function currentWorkspaceNodeTypes() {
+  return workspaces.get(activeWorkspaceId)?.nodeTypes ?? [];
+}
+
+function initMetadataEditor(metadata) {
+  metadataEditorMode = "normal";
+  metadataOriginalTitle = typeof metadata.title === "string" ? metadata.title : "";
+  document.getElementById("metadata-mode-normal").classList.add("active");
+  document.getElementById("metadata-mode-raw").classList.remove("active");
+  document.getElementById("metadata-normal-panel").classList.remove("hidden");
+  document.getElementById("metadata-raw-panel").classList.add("hidden");
+  showMetadataRawError("");
+  renderMetadataNormalMode(metadataModelFromJson(metadata), currentWorkspaceNodeTypes());
+}
+
+function teardownMetadataEditor() {
+  metadataFieldHandles = null;
+  metadataExtensionsHandle = null;
+}
+
+// Returns `{ json }` with the metadata to save, from whichever mode is
+// currently active, or `{ error }` if Raw mode's text doesn't parse — the
+// caller shows that inline and must not send the command. `title` is stitched
+// back in here (not in metadataModelToJson, which also feeds the Raw-mode
+// textarea) purely so the payload satisfies NodeMetadata's mandatory field —
+// neither view ever displays it as something worth editing.
+function currentMetadataForSave() {
+  if (metadataEditorMode === "raw") {
+    const { model, error } = parseMetadataModel(
+      document.getElementById("metadata-raw-textarea").value,
+    );
+    if (error) {
+      return { error };
+    }
+    return { json: { title: metadataOriginalTitle, ...metadataModelToJson(model) } };
+  }
+  return {
+    json: { title: metadataOriginalTitle, ...metadataModelToJson(collectMetadataModelFromNormalMode()) },
+  };
+}
+
+function switchEditorTab(tab) {
+  document.getElementById("viewer-editor-tab-content").classList.toggle("active", tab === "content");
+  document.getElementById("viewer-editor-tab-metadata").classList.toggle("active", tab === "metadata");
+  document.getElementById("viewer-editor-content-panel").classList.toggle("hidden", tab !== "content");
+  document.getElementById("viewer-editor-metadata-panel").classList.toggle("hidden", tab !== "metadata");
+  document.getElementById("viewer-editor-metadata-panel").classList.toggle("flex", tab === "metadata");
+}
+
 // Keeps the reading pane's Edit button in sync with whatever else is going
 // on: hidden with nothing selected, while already editing/creating, or while
 // the selection is stale (its cached content isn't trustworthy to seed an
@@ -2840,6 +3434,8 @@ function enterEditMode() {
       conflict.textContent = "";
       const textarea = document.getElementById("viewer-editor-textarea");
       easyMdeInstance = createMarkdownEditor(textarea, source.markdown_content);
+      initMetadataEditor(source.metadata);
+      switchEditorTab("content");
     })
     .catch(reportError);
 }
@@ -2852,6 +3448,7 @@ function exitEditMode() {
     easyMdeInstance.toTextArea();
     easyMdeInstance = null;
   }
+  teardownMetadataEditor();
   state.editing = null;
   document.getElementById("viewer-editor").classList.add("hidden");
   document.getElementById("viewer-editor").classList.remove("flex");
@@ -2878,12 +3475,21 @@ function saveEdit() {
     return;
   }
   const { id, expectedVersion } = state.editing;
+  const metadataResult = currentMetadataForSave();
+  if (metadataResult.error) {
+    // Only Raw mode's own parse can fail here — Normal mode's fields are
+    // already structured JS values with nothing left to parse.
+    switchEditorTab("metadata");
+    showMetadataRawError(metadataResult.error);
+    return;
+  }
   const content = easyMdeInstance.value();
   state.pendingEdit = { id, expectedVersion };
   setEditorSaving(true);
   const sent = sendCommand("update_node", {
     selector: id,
     content,
+    metadata: metadataResult.json,
     expected_version: expectedVersion,
   });
   if (!sent) {
@@ -2913,6 +3519,7 @@ async function handleUpdateNodeResponse(envelope) {
     easyMdeInstance.toTextArea();
     easyMdeInstance = null;
   }
+  teardownMetadataEditor();
   document.getElementById("viewer-editor").classList.add("hidden");
   document.getElementById("viewer-editor").classList.remove("flex");
   document.getElementById("viewer-content").classList.remove("hidden");
@@ -3704,6 +4311,22 @@ document.getElementById("viewer-editor-cancel").addEventListener("click", () => 
 
 document.getElementById("viewer-editor-save").addEventListener("click", () => {
   saveEdit();
+});
+
+document.getElementById("viewer-editor-tab-content").addEventListener("click", () => {
+  switchEditorTab("content");
+});
+
+document.getElementById("viewer-editor-tab-metadata").addEventListener("click", () => {
+  switchEditorTab("metadata");
+});
+
+document.getElementById("metadata-mode-normal").addEventListener("click", () => {
+  switchMetadataMode("normal");
+});
+
+document.getElementById("metadata-mode-raw").addEventListener("click", () => {
+  switchMetadataMode("raw");
 });
 
 document.getElementById("viewer-create-cancel").addEventListener("click", () => {

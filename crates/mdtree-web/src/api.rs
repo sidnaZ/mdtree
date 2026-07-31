@@ -8,7 +8,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use mdtree_core::{Node, NodeId, NodeSelector, ReferenceTarget, SemanticError};
+use mdtree_core::{Node, NodeId, NodeMetadata, NodeSelector, ReferenceTarget, SemanticError};
 use mdtree_sqlite::{SqliteStore, StoreError};
 use serde::Serialize;
 
@@ -60,6 +60,11 @@ pub(crate) struct WorkspaceSummary {
     /// show a complete relations legend up front instead of only relation
     /// types discovered as specific nodes happen to be fetched.
     relation_types: Vec<String>,
+    /// Every node type this workspace uses, either as a node's own
+    /// `node_type` or as an entry in some node's `accepts_children` — lets
+    /// the metadata editor suggest known types without requiring a node to
+    /// be loaded first.
+    node_types: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -86,6 +91,7 @@ pub(crate) async fn workspaces(
             name: workspace.name.clone(),
             root: workspace.root.to_string(),
             relation_types: store.all_relation_types()?,
+            node_types: store.all_node_types()?,
         });
     }
     Ok(Json(WorkspacesResponse {
@@ -300,6 +306,10 @@ pub(crate) async fn render(
 #[derive(Serialize)]
 pub(crate) struct SourceResponse {
     markdown_content: String,
+    /// Seeds the metadata editor. Serializes the same way as the on-disk
+    /// JSON (`extensions` flattened back to top-level keys), so a client can
+    /// show it in Raw mode with no reshaping.
+    metadata: NodeMetadata,
     /// Optimistic-concurrency token for a subsequent `update_node` command,
     /// fetched fresh at the moment editing begins rather than trusting a
     /// possibly-stale `NodeSummary.version` the client cached earlier.
@@ -320,6 +330,7 @@ pub(crate) async fn source(
 
     Ok(Json(SourceResponse {
         markdown_content: node.fields().markdown_content.clone(),
+        metadata: node.fields().metadata.clone(),
         version: node.fields().version,
     }))
 }
