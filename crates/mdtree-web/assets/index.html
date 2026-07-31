@@ -439,8 +439,126 @@
         </div>
         <div id="viewer-content" class="prose prose-sm prose-slate max-w-none flex-1 overflow-y-auto p-5 dark:prose-invert"></div>
         <div id="viewer-editor" class="hidden flex-1 flex-col overflow-hidden">
-          <div class="min-h-0 flex-1 overflow-y-auto p-3">
+          <div class="flex flex-none items-center gap-5 border-b border-slate-200 px-3 dark:border-slate-800">
+            <button
+              id="viewer-editor-tab-content"
+              type="button"
+              data-tab="content"
+              class="editor-page-tab active"
+            >Content</button>
+            <button
+              id="viewer-editor-tab-metadata"
+              type="button"
+              data-tab="metadata"
+              class="editor-page-tab"
+            >Metadata</button>
+          </div>
+          <div id="viewer-editor-content-panel" class="min-h-0 flex-1 overflow-y-auto p-3">
             <textarea id="viewer-editor-textarea"></textarea>
+          </div>
+          <div id="viewer-editor-metadata-panel" class="hidden min-h-0 flex-1 flex-col overflow-hidden">
+            <div class="flex flex-none items-center border-b border-slate-200 px-3 py-2 dark:border-slate-800">
+              <div class="segmented-control">
+                <button
+                  id="metadata-mode-normal"
+                  type="button"
+                  data-mode="normal"
+                  class="segmented-control-button active"
+                >Normal</button>
+                <button
+                  id="metadata-mode-raw"
+                  type="button"
+                  data-mode="raw"
+                  class="segmented-control-button"
+                >Raw</button>
+              </div>
+            </div>
+            <div id="metadata-normal-panel" class="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+              <details id="metadata-section-main" class="metadata-section" open>
+                <summary class="metadata-section-summary">
+                  <svg viewBox="0 0 20 20" fill="none" class="metadata-section-chevron h-3.5 w-3.5 flex-none" stroke="currentColor" stroke-width="2">
+                    <path d="M7.5 5l5 5-5 5" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                  <span class="metadata-section-title">Main fields</span>
+                </summary>
+                <div class="metadata-section-body space-y-4">
+                  <div>
+                    <label
+                      for="metadata-field-summary"
+                      class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500"
+                    >Summary</label>
+                    <textarea
+                      id="metadata-field-summary"
+                      rows="2"
+                      spellcheck="false"
+                      placeholder="Concise description&hellip;"
+                      class="w-full resize-y rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-sm text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:placeholder:text-slate-500"
+                    ></textarea>
+                  </div>
+                  <div>
+                    <label
+                      for="metadata-field-node-type"
+                      class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500"
+                    >Node type</label>
+                    <input
+                      id="metadata-field-node-type"
+                      type="text"
+                      autocomplete="off"
+                      spellcheck="false"
+                      list="metadata-node-type-list"
+                      placeholder="e.g. runbook&hellip;"
+                      class="w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-sm text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:placeholder:text-slate-500"
+                    />
+                    <datalist id="metadata-node-type-list"></datalist>
+                  </div>
+                  <div>
+                    <span class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Aliases</span>
+                    <div id="metadata-field-aliases" class="chip-input"></div>
+                  </div>
+                  <div>
+                    <span class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Keywords</span>
+                    <div id="metadata-field-keywords" class="chip-input"></div>
+                  </div>
+                  <div>
+                    <span class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Tags</span>
+                    <div id="metadata-field-tags" class="chip-input"></div>
+                  </div>
+                  <div>
+                    <span class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Accepts children</span>
+                    <div id="metadata-field-accepts-children" class="chip-input"></div>
+                  </div>
+                  <div>
+                    <span class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Owns</span>
+                    <div id="metadata-field-owns" class="chip-input"></div>
+                  </div>
+                  <div>
+                    <span class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Excludes</span>
+                    <div id="metadata-field-excludes" class="chip-input"></div>
+                  </div>
+                </div>
+              </details>
+              <details id="metadata-section-custom" class="metadata-section">
+                <summary class="metadata-section-summary">
+                  <svg viewBox="0 0 20 20" fill="none" class="metadata-section-chevron h-3.5 w-3.5 flex-none" stroke="currentColor" stroke-width="2">
+                    <path d="M7.5 5l5 5-5 5" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                  <span class="metadata-section-title">Custom fields</span>
+                  <span id="metadata-section-custom-count" class="metadata-section-badge" hidden></span>
+                  <span class="metadata-section-hint">Any JSON value</span>
+                </summary>
+                <div class="metadata-section-body">
+                  <div id="metadata-field-extensions" class="json-tree-root"></div>
+                </div>
+              </details>
+            </div>
+            <div id="metadata-raw-panel" class="hidden min-h-0 flex-1 flex-col overflow-hidden p-3">
+              <textarea
+                id="metadata-raw-textarea"
+                spellcheck="false"
+                class="min-h-0 flex-1 resize-none rounded-md border border-slate-300 bg-white p-2.5 font-mono text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+              ></textarea>
+              <p id="metadata-raw-error" hidden class="mt-2 text-xs text-rose-600 dark:text-rose-300"></p>
+            </div>
           </div>
           <div class="flex flex-none items-center gap-2 border-t border-slate-200 px-4 py-2.5 dark:border-slate-800">
             <span id="viewer-editor-conflict" hidden class="mr-auto min-w-0 truncate text-xs text-rose-600 dark:text-rose-300"></span>

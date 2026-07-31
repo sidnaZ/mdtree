@@ -448,4 +448,170 @@
   .search-result-item.highlighted {
     @apply bg-slate-100 dark:bg-slate-800;
   }
+
+  /* Content/Metadata page tabs atop the node editor: an underline indicator
+     that sits flush on the strip's own bottom border, the same idiom as
+     GitHub/Linear-style tabs — sized and weighted more prominently than the
+     Normal/Raw segmented control below it, since this is the higher-level
+     choice of the two. */
+  .editor-page-tab {
+    @apply relative px-1 py-2 text-sm font-medium text-slate-500 transition hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100;
+  }
+
+  .editor-page-tab::after {
+    content: "";
+    @apply absolute inset-x-0 -bottom-px block h-0.5 rounded-full bg-transparent transition;
+  }
+
+  .editor-page-tab.active {
+    @apply text-indigo-600 dark:text-indigo-300;
+  }
+
+  .editor-page-tab.active::after {
+    @apply bg-indigo-600 dark:bg-indigo-400;
+  }
+
+  /* Normal/Raw segmented control inside the Metadata tab: a compact
+     iOS-style pill switch, deliberately smaller and quieter than the page
+     tabs above it so the view-mode toggle reads as a sub-choice, not another
+     top-level tab. */
+  .segmented-control {
+    @apply inline-flex items-center gap-0.5 rounded-full bg-slate-100 p-0.5 dark:bg-slate-800;
+  }
+
+  .segmented-control-button {
+    @apply rounded-full px-3 py-1 text-xs font-medium text-slate-500 transition hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200;
+  }
+
+  .segmented-control-button.active {
+    @apply bg-white text-indigo-700 shadow-sm dark:bg-slate-600 dark:text-indigo-200;
+  }
+
+  /* Collapsible Main fields / Custom fields groups in the Metadata tab's
+     Normal mode — plain `<details>`/`<summary>` rather than a hand-rolled
+     toggle, so open/closed state, keyboard activation, and screen-reader
+     semantics come from the browser for free. */
+  .metadata-section {
+    @apply overflow-hidden rounded-md border border-slate-200 dark:border-slate-700;
+  }
+
+  .metadata-section-summary {
+    @apply flex list-none items-center gap-2 px-3 py-2 text-sm font-medium text-slate-700 transition marker:hidden hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800/60;
+  }
+
+  .metadata-section-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .metadata-section-chevron {
+    @apply transition-transform duration-150;
+  }
+
+  details[open] > .metadata-section-summary .metadata-section-chevron {
+    @apply rotate-90;
+  }
+
+  .metadata-section-title {
+    @apply flex-1;
+  }
+
+  .metadata-section-hint {
+    @apply text-[10px] font-normal text-slate-400;
+  }
+
+  .metadata-section-badge {
+    @apply rounded-full bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-300;
+  }
+
+  .metadata-section-body {
+    @apply border-t border-slate-200 p-3 dark:border-slate-700;
+  }
+
+  /* Chip/tag input (aliases, keywords, tags, owns, excludes, accepts
+     children): a bordered box that looks like a single text field, but the
+     committed values render as removable chips ahead of the live cursor. */
+  .chip-input-box {
+    @apply rounded-md border border-slate-300 bg-white px-1.5 py-1 focus-within:ring-2 focus-within:ring-indigo-400 dark:border-slate-700 dark:bg-slate-800;
+  }
+
+  .chip-input-chips {
+    @apply flex flex-wrap items-center gap-1.5;
+  }
+
+  .chip-input-chip {
+    @apply flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700 dark:bg-slate-700 dark:text-slate-200;
+  }
+
+  .chip-input-chip-remove {
+    @apply flex h-3.5 w-3.5 flex-none items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-300/60 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-600 dark:hover:text-slate-100;
+  }
+
+  .chip-input-field {
+    @apply min-w-[6rem] flex-1 border-0 bg-transparent px-1 py-0.5 text-sm text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-0 dark:text-slate-200 dark:placeholder:text-slate-500;
+  }
+
+  /* Recursive JSON-tree editor (metadata "Custom fields" / extensions map):
+     one indented, left-bordered rail per nesting level so a caller can tell
+     how deep a value sits without counting commas the way Raw mode would
+     require. `overflow-x-auto` on the root is the escape valve for however
+     deep a caller's data actually nests — each level's indent plus its own
+     row content adds up, and a wide, deeply-nested value should scroll
+     inside this one field rather than push the whole panel (or page) wider,
+     per the standing "no widening the page" rule for scrollable content. */
+  .json-tree-root {
+    @apply space-y-1.5 overflow-x-auto;
+  }
+
+  .json-tree-rows {
+    @apply ml-3 space-y-1.5 border-l border-slate-200 pl-3 dark:border-slate-700;
+  }
+
+  .json-tree-row {
+    @apply flex items-start gap-1.5;
+  }
+
+  .json-tree-key-input {
+    @apply w-24 flex-none rounded-md border border-slate-300 bg-white px-1.5 py-1 text-xs text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:placeholder:text-slate-500;
+  }
+
+  /* Stacks the type-select+scalar line above a nested object/array's own
+     rows (see .json-tree-value-line) instead of laying them out side by
+     side — the latter let each nesting level push the next one further
+     right rather than down. Deliberately NOT `min-w-0`: that would let this
+     flex item shrink below its content's natural width, and since its
+     content can itself recursively contain more full-width rows, enough
+     nesting shrinks the whole chain to 0 rather than actually overflowing.
+     Left to size naturally, a deep tree instead grows past its box and lets
+     .json-tree-root's overflow-x-auto scroll it — the outcome we want. */
+  .json-tree-value-mount {
+    @apply flex-1 space-y-1.5;
+  }
+
+  .json-tree-value-line {
+    @apply flex flex-wrap items-start gap-1.5;
+  }
+
+  .json-tree-type-select {
+    @apply flex-none rounded-md border border-slate-300 bg-white px-1.5 py-1 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200;
+  }
+
+  .json-tree-value-slot {
+    @apply min-w-0 flex-1;
+  }
+
+  .json-tree-scalar-input {
+    @apply w-full min-w-[6rem] rounded-md border border-slate-300 bg-white px-1.5 py-1 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200;
+  }
+
+  .json-tree-null-label {
+    @apply px-1.5 py-1 text-xs italic text-slate-400 dark:text-slate-500;
+  }
+
+  .json-tree-remove-btn {
+    @apply flex h-6 w-6 flex-none items-center justify-center rounded text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 dark:text-slate-500 dark:hover:bg-rose-950/40 dark:hover:text-rose-300;
+  }
+
+  .json-tree-add-btn {
+    @apply mt-1 rounded-md border border-dashed border-slate-300 px-2 py-1 text-xs font-medium text-slate-500 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:text-slate-400 dark:hover:border-indigo-400 dark:hover:text-indigo-300;
+  }
 }

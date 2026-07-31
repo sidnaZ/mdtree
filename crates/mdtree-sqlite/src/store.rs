@@ -725,6 +725,26 @@ impl SqliteStore {
         Ok(types)
     }
 
+    /// Distinct node-type strings in use across the workspace, alphabetically
+    /// — both as an actual node's `node_type` and as an entry in some node's
+    /// `accepts_children`, since either spot is a legitimate source of a
+    /// "known" type worth suggesting back to a caller.
+    pub fn all_node_types(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT value FROM (
+                 SELECT node_type AS value FROM nodes WHERE node_type IS NOT NULL
+                 UNION
+                 SELECT json_each.value AS value FROM nodes, json_each(nodes.metadata_json, '$.accepts_children')
+             ) ORDER BY value",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut types = Vec::new();
+        for row in rows {
+            types.push(row?);
+        }
+        Ok(types)
+    }
+
     /// Replaces explicit references atomically with the corresponding node revision.
     pub fn set_explicit_references(
         &mut self,
@@ -2624,8 +2644,8 @@ mod tests {
 
     use mdtree_core::{
         CursorScope, Node, NodeFields, NodeHash, NodeId, NodeMetadata, NodeRevision, NodeSelector,
-        PageCursor, PagePosition, PaginationErrorCode, Reference, ReferenceOrigin, ReferenceTarget,
-        ReferenceType, SequentialUlidGenerator, Slug,
+        NodeType, PageCursor, PagePosition, PaginationErrorCode, Reference, ReferenceOrigin,
+        ReferenceTarget, ReferenceType, SequentialUlidGenerator, Slug,
     };
     use mdtree_markdown::{build_derived_records, DerivedNodeRecords};
     use rusqlite::params;
@@ -2841,6 +2861,60 @@ mod tests {
                 .map(|revision| revision.version)
                 .collect::<Vec<_>>(),
             vec![2, 3]
+        );
+    }
+
+    #[test]
+    fn all_node_types_collects_node_type_and_accepts_children_values_deduplicated() {
+        let mut fixture = fixture();
+        let root = fixture.store.root().expect("root");
+
+        let mut runbook_metadata = NodeMetadata::new("Runbook");
+        runbook_metadata.node_type = Some(NodeType::from_str("runbook").expect("node type"));
+        let runbook = Node::new(
+            NodeFields {
+                id: id("01JZ8Q5CWPN8T7KPN5A1V9B6XN"),
+                slug: Slug::from_str("runbook").expect("fixture slug"),
+                metadata: runbook_metadata,
+                markdown_content: "# Runbook\n".into(),
+                sibling_order: 0,
+                version: 1,
+                content_hash: NodeHash::new([1; 32]),
+                revision_hash: NodeHash::new([2; 32]),
+                created_at: 1,
+                updated_at: 1,
+            },
+            Some(root.id()),
+        )
+        .expect("fixture node");
+        create(&mut fixture.store, &runbook, 100);
+
+        let mut collection_metadata = NodeMetadata::new("Collection");
+        collection_metadata.accepts_children = vec![
+            NodeType::from_str("runbook").expect("node type"),
+            NodeType::from_str("database_model").expect("node type"),
+        ];
+        let collection = Node::new(
+            NodeFields {
+                id: id("01JZ8Q5CWPN8T7KPN5A1V9B6XP"),
+                slug: Slug::from_str("collection").expect("fixture slug"),
+                metadata: collection_metadata,
+                markdown_content: "# Collection\n".into(),
+                sibling_order: 1,
+                version: 1,
+                content_hash: NodeHash::new([1; 32]),
+                revision_hash: NodeHash::new([2; 32]),
+                created_at: 1,
+                updated_at: 1,
+            },
+            Some(root.id()),
+        )
+        .expect("fixture node");
+        create(&mut fixture.store, &collection, 200);
+
+        assert_eq!(
+            fixture.store.all_node_types().expect("node types"),
+            vec!["database_model".to_string(), "runbook".to_string()]
         );
     }
 

@@ -96,6 +96,12 @@ struct MoveSubtreePayload {
 struct UpdateNodePayload {
     selector: String,
     content: String,
+    /// Replacement metadata, matching the wire shape of `NodeMetadata`
+    /// (unknown keys land in `extensions`). Omitted keeps the node's current
+    /// metadata unchanged. Its `title`, if present, is ignored: renaming is a
+    /// deliberately separate operation, matching the MCP `update_node` tool.
+    #[serde(default)]
+    metadata: Option<Value>,
     expected_version: u64,
 }
 
@@ -346,22 +352,38 @@ fn update_node(workspace: &WorkspaceState, payload: Value) -> CommandOutcome {
     }
 
     let now = now_millis();
-    // Title/type/etc. are carried forward unchanged — this command only ever
-    // replaces the Markdown body. Renaming is a deliberately separate
-    // operation, matching how the MCP `update_node` tool already treats it.
+    // Title is always carried forward unchanged regardless of what a
+    // supplied `metadata` payload contains — renaming is a deliberately
+    // separate operation, matching how the MCP `update_node` tool already
+    // treats it.
+    let mut metadata = match params
+        .metadata
+        .map(serde_json::from_value::<NodeMetadata>)
+        .transpose()
+    {
+        Ok(metadata) => metadata.unwrap_or_else(|| fields.metadata.clone()),
+        Err(error) => {
+            return CommandOutcome::reject(
+                "update_node".into(),
+                format!("invalid metadata: {error}"),
+            )
+        }
+    };
+    metadata.title.clone_from(&fields.metadata.title);
+
     let prepared = match prepare_node_mutation(
         NodeMutationDraft {
             id: current.id(),
             parent_id: current.parent_id(),
             slug: fields.slug.clone(),
-            metadata: fields.metadata.clone(),
+            metadata,
             markdown_content: params.content,
             sibling_order: fields.sibling_order,
             version: fields.version + 1,
             created_at: fields.created_at,
             updated_at: now,
             created_by: None,
-            change_summary: Some("Edit node content via browse-ui".into()),
+            change_summary: Some("Edit node via browse-ui".into()),
         },
         &SystemUlidGenerator,
     ) {
