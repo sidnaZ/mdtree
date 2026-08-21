@@ -195,4 +195,22 @@ mod tests {
         assert!(APP_JS.contains("&hybrid_fallback=${fallback}"));
         assert!(APP_JS.contains("renderSemanticEvidence(response);"));
     }
+
+    #[test]
+    fn connection_loss_blocks_the_tree_and_stop_uses_program_language() {
+        assert!(INDEX_HTML.contains("id=\"program-state-overlay\""));
+        assert!(INDEX_HTML.contains("role=\"alertdialog\""));
+        assert!(INDEX_HTML.contains("aria-modal=\"true\""));
+        assert!(INDEX_HTML.contains("title=\"Stop MDTree\""));
+        assert!(APP_JS.contains("showProgramStateOverlay(\"reconnecting\")"));
+        assert!(APP_JS.contains("showProgramStateOverlay(\"ended\")"));
+        assert!(APP_JS.contains("hideProgramStateOverlay();"));
+        assert!(APP_JS.contains("The program has ended"));
+        assert!(APP_JS.contains("You can now close this tab."));
+        assert!(APP_JS.contains(
+            "Stop MDTree? This will end the program for everyone using it."
+        ));
+        assert!(!INDEX_HTML.contains("Stop the browse-ui server"));
+        assert!(!APP_JS.contains("Stop the browse-ui server"));
+    }
 }

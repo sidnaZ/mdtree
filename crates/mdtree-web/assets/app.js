@@ -416,6 +416,30 @@ function setConnectionState(connectionState) {
   // The state is surfaced only as a hover tooltip (no visible text label),
   // so the dot alone stays a compact, unobtrusive header element.
   element.title = capitalize(connectionState);
+  if (connectionState === "connected") {
+    hideProgramStateOverlay();
+  } else if (connectionState === "disconnected") {
+    showProgramStateOverlay("reconnecting");
+  } else if (connectionState === "closed" || connectionState === "lost") {
+    showProgramStateOverlay("ended");
+  }
+}
+
+function showProgramStateOverlay(programState) {
+  const overlay = document.getElementById("program-state-overlay");
+  const ended = programState === "ended";
+  overlay.dataset.state = programState;
+  document.getElementById("program-state-title").textContent = ended
+    ? "The program has ended"
+    : "Reconnecting to MDTree…";
+  document.getElementById("program-state-message").textContent = ended
+    ? "You can now close this tab."
+    : "Please wait. You can continue when MDTree reconnects.";
+  overlay.hidden = false;
+}
+
+function hideProgramStateOverlay() {
+  document.getElementById("program-state-overlay").hidden = true;
 }
 
 // Shared by the Expand menu's "root node" option (setUpStatusControls) and
@@ -507,7 +531,7 @@ function setUpStatusControls() {
     toggleShortcutHelp();
   });
   document.getElementById("control-stop").addEventListener("click", () => {
-    stopServer().catch(reportError);
+    stopProgram().catch(reportError);
   });
 }
 
@@ -524,14 +548,18 @@ function toggleTheme() {
 // may end the session for everyone. A confirmation guards against an
 // accidental click, since this affects every connected tab/process, not
 // just the one clicking it.
-async function stopServer() {
-  if (!window.confirm("Stop the browse-ui server for all connected clients?")) {
+async function stopProgram() {
+  if (!window.confirm("Stop MDTree? This will end the program for everyone using it.")) {
     return;
   }
-  await fetch("/api/stop", {
+  const response = await fetch("/api/stop", {
     method: "POST",
     headers: { "x-mdtree-session": sessionCredential },
   });
+  if (!response.ok) {
+    throw new Error("MDTree could not be stopped.");
+  }
+  showProgramStateOverlay("ended");
 }
 
 // Each open workspace keeps its own persistent connection (rather than one

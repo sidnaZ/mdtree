@@ -1,10 +1,10 @@
 //! Cross-workspace node search backing the header search box.
 //!
-//! Default matching is a plain, case-insensitive title/slug substring match.
-//! Three qualifiers layer on top of (or replace) that default: `workspace:`
-//! restricts which open workspace(s) are searched, `slug:` matches only the
-//! slug, and `text:` runs the existing weighted section-content search
-//! (`SqliteStore::search_content`) instead of a plain substring match.
+//! Default matching uses the weighted section-content search, including title,
+//! metadata, headings, and Markdown content. Three qualifiers refine that
+//! default: `workspace:` restricts which open workspace(s) are searched,
+//! `slug:` matches only the slug, and `text:` supplies an explicit content
+//! query when the unqualified text is being used as a title/slug filter.
 
 use std::collections::HashSet;
 
@@ -88,8 +88,20 @@ struct ParsedQuery {
     workspace: Option<String>,
     slug: Option<String>,
     text: Option<String>,
-    /// Free text outside any qualifier; matched against title and slug.
+    /// Free text outside any qualifier. By itself this is the lexical content
+    /// query; alongside `text:` it remains a title/slug filter.
     default: Option<String>,
+}
+
+impl ParsedQuery {
+    fn lexical_content_query(&self) -> Option<&str> {
+        self.text.as_deref().or(self.default.as_deref())
+    }
+
+    fn default_title_slug_filter(&self) -> Option<&str> {
+        self.text.as_ref()?;
+        self.default.as_deref()
+    }
 }
 
 const QUALIFIERS: [&str; 3] = ["workspace:", "slug:", "text:"];
@@ -244,11 +256,11 @@ fn lexical_search(
             .lock()
             .expect("workspace store mutex poisoned");
 
-        let text_hits: Option<HashSet<NodeId>> = match &parsed.text {
+        let text_hits: Option<HashSet<NodeId>> = match parsed.lexical_content_query() {
             Some(text) => Some(
                 store
                     .search_content(&SearchRequest {
-                        query: text.clone(),
+                        query: text.to_string(),
                         mode: mdtree_core::SearchMode::Lexical,
                         scope: SearchScope::Workspace,
                         scope_node: None,
@@ -274,7 +286,7 @@ fn lexical_search(
                     continue;
                 }
             }
-            if let Some(term) = &parsed.default {
+            if let Some(term) = parsed.default_title_slug_filter() {
                 if !contains_ignore_case(&title, term) && !contains_ignore_case(&slug, term) {
                     continue;
                 }
@@ -538,6 +550,15 @@ mod tests {
         assert_eq!(parsed.default.as_deref(), Some("orders table"));
         assert!(parsed.workspace.is_none());
         assert!(parsed.slug.is_none());
+        assert!(parsed.text.is_none());
+    }
+
+    #[test]
+    fn plain_text_is_used_as_the_lexical_content_query() {
+        let parsed = parse_query("tabul");
+
+        assert_eq!(parsed.lexical_content_query(), Some("tabul"));
+        assert!(parsed.default_title_slug_filter().is_none());
         assert!(parsed.text.is_none());
     }
 

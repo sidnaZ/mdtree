@@ -34,6 +34,13 @@ codex mcp add mdtree -- mdtree-mcp --allow-write --allow-workspace-switch --work
 claude mcp add --transport stdio --scope user mdtree -- mdtree-mcp --allow-write --allow-workspace-switch --workspace-root .
 ```
 
+## Developer knowledge base
+
+New contributors should start with the
+[MDTree Developer Knowledge Base](KNOWLEDGE_BASE.md). It covers the architecture,
+crate responsibilities, local workflows, testing, debugging, migrations,
+semantic indexing, MCP and web security boundaries, and the release process.
+
 ## License and contact
 
 MDTree is dual-licensed under the [GNU Affero General Public License v3.0](LICENSE)

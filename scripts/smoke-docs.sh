@@ -28,7 +28,7 @@ cargo run --quiet -p mdtree-cli -- --workspace "$work/example.mdtree" browse-ui 
 browse_url=$(tr -d '\r\n' <"$browse_log")
 [ -n "$browse_url" ]
 curl -sf "$browse_url/" | grep -qi "<title>MDTree</title>"
-session=$(curl -sf "$browse_url/api/session")
+session=$(curl -sf "$browse_url/api/workspaces")
 printf '%s' "$session" | grep -q '"session_credential"'
 credential=$(printf '%s' "$session" | sed -n 's/.*"session_credential":"\([^"]*\)".*/\1/p')
 curl -sf -X POST -H "x-mdtree-session: $credential" "$browse_url/api/stop" >/dev/null
