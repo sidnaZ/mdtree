@@ -57,16 +57,23 @@ mod tests {
     use super::{APP_JS, INDEX_HTML, STYLE_CSS};
 
     #[test]
-    fn keyboard_shortcuts_toggle_markdown_and_copy_the_canonical_path_with_feedback() {
+    fn keyboard_shortcuts_toggle_markdown_and_copy_the_node_selector_with_feedback() {
         assert!(APP_JS.contains("event.key === \"v\" || event.key === \"V\""));
         assert!(APP_JS.contains("if (event.ctrlKey || event.metaKey)"));
-        assert!(APP_JS.contains("copySelectedPath().catch(reportError)"));
-        assert!(APP_JS.contains("summaryForNode(selectedId)?.path"));
+        assert!(APP_JS.contains("copySelectedSelector().catch(reportError)"));
+        assert!(APP_JS.contains("await writeClipboard(selectedId);"));
         assert!(APP_JS.contains("flashCopiedNode(selectedId)"));
         assert!(STYLE_CSS.contains(".node-card.path-copied:after"));
         assert!(STYLE_CSS.contains("node-path-copied"));
         assert!(INDEX_HTML.contains("Show/hide the Markdown preview pane"));
-        assert!(INDEX_HTML.contains("Copy selected node path"));
+        assert!(INDEX_HTML.contains("Copy selected node selector"));
+    }
+
+    #[test]
+    fn home_selects_the_root_and_visually_fits_it_like_the_f_shortcut() {
+        assert!(APP_JS.contains(
+            "if (event.key === \"Home\") {\n    event.preventDefault();\n    setSelected(state.root);\n    fitToView();"
+        ));
     }
 
     #[test]

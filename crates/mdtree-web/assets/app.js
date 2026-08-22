@@ -3831,16 +3831,12 @@ function noteSelfCausedChange() {
   }
 }
 
-async function copySelectedPath() {
+async function copySelectedSelector() {
   const selectedId = state.selected;
   if (!selectedId) {
     return;
   }
-  const path = summaryForNode(selectedId)?.path;
-  if (!path) {
-    return;
-  }
-  await writeClipboard(path);
+  await writeClipboard(selectedId);
   flashCopiedNode(selectedId);
 }
 
@@ -4211,6 +4207,7 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Home") {
     event.preventDefault();
     setSelected(state.root);
+    fitToView();
     return;
   }
   if (event.key === "/") {
@@ -4293,7 +4290,7 @@ document.addEventListener("keydown", (event) => {
   }
   if (!event.shiftKey && (event.key === "c" || event.key === "C")) {
     event.preventDefault();
-    copySelectedPath().catch(reportError);
+    copySelectedSelector().catch(reportError);
     return;
   }
   if (event.key === "r" || event.key === "R") {
