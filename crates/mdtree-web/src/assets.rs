@@ -108,7 +108,9 @@ mod tests {
     #[test]
     fn enter_toggles_expand_on_the_selected_node_like_space_does() {
         assert_eq!(
-            APP_JS.matches("toggleExpand(state.selected).catch(reportError);").count(),
+            APP_JS
+                .matches("toggleExpand(state.selected).catch(reportError);")
+                .count(),
             2,
             "expected both the Space and Enter handlers to toggle expand on the selection"
         );
@@ -118,7 +120,9 @@ mod tests {
 
     #[test]
     fn a_node_with_more_relations_than_fit_one_row_wraps_instead_of_overflowing() {
-        assert!(APP_JS.contains("relationsRow.className = \"flex flex-wrap items-center gap-1.5\";"));
+        assert!(
+            APP_JS.contains("relationsRow.className = \"flex flex-wrap items-center gap-1.5\";")
+        );
         assert!(!APP_JS.contains("relationsRow.className = \"flex h-2 items-center gap-1.5\";"));
         assert!(APP_JS.contains("function relationsRowCount(node) {"));
         assert!(APP_JS.contains("const RELATIONS_DOTS_PER_ROW = Math.floor("));
@@ -163,9 +167,8 @@ mod tests {
     fn sibling_spacing_accounts_for_each_cards_actual_height_not_just_its_own() {
         assert!(APP_JS.contains("function topExtent(node) {"));
         assert!(APP_JS.contains("function bottomExtent(node) {"));
-        assert!(APP_JS.contains(
-            "previousY + bottomExtent(previousChild) + SLOT_GAP + topExtent(child)"
-        ));
+        assert!(APP_JS
+            .contains("previousY + bottomExtent(previousChild) + SLOT_GAP + topExtent(child)"));
         assert!(!APP_JS.contains("function subtreeHeight(node) {"));
     }
 
@@ -175,9 +178,8 @@ mod tests {
         assert!(APP_JS.contains("suppressNextChangeSweeps: 0,"));
         assert!(APP_JS.contains("function noteSelfCausedChange() {"));
         assert!(APP_JS.contains("workspace.suppressNextChangeSweeps += 1;"));
-        assert!(APP_JS.contains(
-            "if (workspace.suppressNextChangeSweeps > 0) {\n        workspace.suppressNextChangeSweeps -= 1;"
-        ));
+        assert!(APP_JS.contains("if (workspace.suppressNextChangeSweeps > 0) {"));
+        assert!(APP_JS.contains("workspace.suppressNextChangeSweeps -= 1;"));
     }
 
     #[test]
@@ -214,10 +216,27 @@ mod tests {
         assert!(APP_JS.contains("hideProgramStateOverlay();"));
         assert!(APP_JS.contains("The program has ended"));
         assert!(APP_JS.contains("You can now close this tab."));
-        assert!(APP_JS.contains(
-            "Stop MDTree? This will end the program for everyone using it."
-        ));
+        assert!(APP_JS.contains("Stop MDTree? This will end the program for everyone using it."));
         assert!(!INDEX_HTML.contains("Stop the browse-ui server"));
         assert!(!APP_JS.contains("Stop the browse-ui server"));
+    }
+
+    #[test]
+    fn checkpoint_control_shows_git_readiness_and_calls_the_authenticated_endpoint() {
+        assert!(INDEX_HTML.contains("id=\"control-checkpoint\""));
+        assert!(INDEX_HTML.contains("id=\"checkpoint-state\""));
+        assert!(APP_JS.contains("async function checkpointWorkspace()"));
+        assert!(APP_JS.contains("`/api/${activeWorkspaceId}/checkpoint`"));
+        assert_eq!(
+            APP_JS
+                .matches("workspace.checkpointReady = envelope.payload?.checkpoint_ready ?? false;")
+                .count(),
+            2,
+            "both reconnect initialization and live changes must refresh readiness"
+        );
+        assert!(APP_JS.contains("const revisionChanged ="));
+        assert!(APP_JS.contains("if (revisionChanged) {"));
+        assert!(STYLE_CSS.contains("#checkpoint-state[data-state=ready]"));
+        assert!(STYLE_CSS.contains("#checkpoint-state[data-state=pending]"));
     }
 }

@@ -181,6 +181,10 @@ fn session_credential(address: &str) -> String {
 /// Sends a raw `POST <path>` request with no body, optionally carrying a
 /// session-credential header, and returns the status code.
 fn http_post(address: &str, path: &str, session_header: Option<&str>) -> u16 {
+    http_post_response(address, path, session_header).0
+}
+
+fn http_post_response(address: &str, path: &str, session_header: Option<&str>) -> (u16, String) {
     let mut stream = TcpStream::connect(address).expect("connect to the loopback listener");
     let mut request = format!(
         "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Length: 0\r\nConnection: close\r\n"
@@ -193,13 +197,17 @@ fn http_post(address: &str, path: &str, session_header: Option<&str>) -> u16 {
 
     let mut response = String::new();
     stream.read_to_string(&mut response).expect("read response");
-    let status_line = response.lines().next().expect("status line");
-    status_line
+    let mut parts = response.splitn(2, "\r\n\r\n");
+    let head = parts.next().expect("response head");
+    let body = parts.next().unwrap_or_default().to_string();
+    let status_line = head.lines().next().expect("status line");
+    let status = status_line
         .split_whitespace()
         .nth(1)
         .expect("status code")
         .parse()
-        .expect("numeric status code")
+        .expect("numeric status code");
+    (status, body)
 }
 
 #[test]
@@ -443,6 +451,16 @@ fn browse_ui_serves_session_node_and_sanitized_render_endpoints() {
         .as_str()
         .expect("credential")
         .is_empty());
+    assert!(session["workspaces"][0]["checkpoint_ready"]
+        .as_bool()
+        .expect("checkpoint readiness"));
+    assert_eq!(http_post(address, "/api/0/checkpoint", None), 403);
+    let credential = session["session_credential"].as_str().expect("credential");
+    let (status, body) = http_post_response(address, "/api/0/checkpoint", Some(credential));
+    assert_eq!(status, 200);
+    let checkpoint: serde_json::Value =
+        serde_json::from_str(&body).expect("checkpoint response JSON");
+    assert!(checkpoint["complete"].as_bool().expect("complete"));
 
     let (status, body) = http_get(address, &format!("/api/0/node/{root_id}"), None);
     assert_eq!(status, 200);
@@ -687,6 +705,10 @@ async fn browse_ui_websocket_sends_init_then_shutdown_on_stop() {
     assert_eq!(
         envelope["payload"]["root"],
         session["workspaces"][0]["root"].clone()
+    );
+    assert_eq!(
+        envelope["payload"]["checkpoint_ready"],
+        session["workspaces"][0]["checkpoint_ready"].clone()
     );
     assert!(envelope["revision"].is_u64());
 

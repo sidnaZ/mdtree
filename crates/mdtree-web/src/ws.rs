@@ -94,10 +94,17 @@ async fn handle_connection(mut socket: WebSocket, state: AppState, workspace: Wo
 
     state.client_activity.client_connected();
     let revision = current_revision(&workspace);
+    let checkpoint_ready = workspace
+        .checkpointed_revision
+        .load(std::sync::atomic::Ordering::SeqCst)
+        == revision;
     let init = Envelope::new(
         &connection_id,
         "init",
-        serde_json::json!({ "root": workspace.root.to_string() }),
+        serde_json::json!({
+            "root": workspace.root.to_string(),
+            "checkpoint_ready": checkpoint_ready
+        }),
         Some(revision),
     );
     if send(&mut socket, &init).await.is_err() {
@@ -141,12 +148,17 @@ async fn handle_connection(mut socket: WebSocket, state: AppState, workspace: Wo
                 // change is reported without a specific node id: the client
                 // conservatively marks its whole visible scope stale rather
                 // than guessing which node changed.
-                let revision = match change {
-                    Ok(event) => Some(event.revision),
-                    Err(broadcast::error::RecvError::Lagged(_)) => None,
+                let (revision, checkpoint_ready) = match change {
+                    Ok(event) => (Some(event.revision), Some(event.checkpoint_ready)),
+                    Err(broadcast::error::RecvError::Lagged(_)) => (None, None),
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
-                let message = Envelope::new(&connection_id, "change", serde_json::json!({}), revision);
+                let message = Envelope::new(
+                    &connection_id,
+                    "change",
+                    serde_json::json!({ "checkpoint_ready": checkpoint_ready }),
+                    revision,
+                );
                 if send(&mut socket, &message).await.is_err() {
                     break;
                 }

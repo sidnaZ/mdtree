@@ -23,11 +23,11 @@ use mdtree_semantic::{
     OllamaProvider, SemanticBuildOptions, SemanticSearchError, DEFAULT_OLLAMA_BASE_URL,
 };
 use mdtree_sqlite::{
-    backup_workspace, check_workspace, doctor_workspace, export_markdown_node,
-    export_markdown_snapshot, export_snapshot_json, import_markdown_snapshot_new,
-    import_snapshot_new, plan_json_import, prepare_node_mutation, restore_workspace,
-    workspace_status, AtomicTreeMove, AtomicTreeRemoval, CheckStatus, NodeMutationDraft,
-    PreparedBatchOperation, PreparedNodeMutation, SqliteStore, WorkspaceError,
+    backup_workspace, check_workspace, checkpoint_workspace, doctor_workspace,
+    export_markdown_node, export_markdown_snapshot, export_snapshot_json,
+    import_markdown_snapshot_new, import_snapshot_new, plan_json_import, prepare_node_mutation,
+    restore_workspace, workspace_status, AtomicTreeMove, AtomicTreeRemoval, CheckStatus,
+    NodeMutationDraft, PreparedBatchOperation, PreparedNodeMutation, SqliteStore, WorkspaceError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -230,6 +230,9 @@ pub enum Command {
         /// New backup destination.
         destination: PathBuf,
     },
+    /// Merge committed WAL changes into the primary workspace file for archiving.
+    #[command(alias = "flush")]
+    Checkpoint,
     /// Restore a validated backup.
     Restore {
         /// Validated backup source.
@@ -829,24 +832,23 @@ pub fn main_entry() -> ExitCode {
 }
 
 fn workspace_shorthand_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
-    let args = args.into_iter().collect::<Vec<_>>();
-    if args.len() != 2 {
+    let mut args = args.into_iter().collect::<Vec<_>>();
+    if args.len() < 2 {
         return args;
     }
     let candidate = &args[1];
+    let is_option = candidate.to_string_lossy().starts_with('-');
     let is_subcommand = candidate.to_str().is_some_and(|candidate| {
-        Cli::command()
-            .get_subcommands()
-            .any(|command| command.get_name() == candidate)
+        Cli::command().get_subcommands().any(|command| {
+            command.get_name() == candidate
+                || command.get_all_aliases().any(|alias| alias == candidate)
+        })
     });
-    if is_subcommand || !Path::new(candidate).is_file() {
+    if is_option || is_subcommand || !Path::new(candidate).is_file() {
         return args;
     }
-    vec![
-        args[0].clone(),
-        OsString::from("--workspace"),
-        candidate.clone(),
-    ]
+    args.insert(1, OsString::from("--workspace"));
+    args
 }
 
 /// Executes a parsed command against an injected output writer.
@@ -933,6 +935,13 @@ pub fn execute(cli: &Cli, output: &mut dyn Write) -> anyhow::Result<u8> {
                 cli.output,
                 &serde_json::json!({"status":"backed_up"}),
             )?;
+        }
+        Command::Checkpoint => {
+            let report = checkpoint_workspace(&store)?;
+            emit(output, cli.output, &report)?;
+            if !report.complete {
+                return Ok(EXIT_INVALID);
+            }
         }
         Command::Export {
             destination,
@@ -3062,12 +3071,23 @@ mod tests {
 
         assert_eq!(cli.workspace.as_deref(), Some(workspace.as_path()));
         assert!(cli.command.is_none());
+
+        let cli = Cli::try_parse_from(workspace_shorthand_args([
+            "mdtree".into(),
+            workspace.clone().into_os_string(),
+            "checkpoint".into(),
+        ]))
+        .expect("workspace shorthand with command");
+        assert_eq!(cli.workspace.as_deref(), Some(workspace.as_path()));
+        assert!(matches!(cli.command, Some(Command::Checkpoint)));
     }
 
     #[test]
     fn workspace_shorthand_preserves_commands_and_missing_paths() {
         let command = workspace_shorthand_args(["mdtree".into(), "status".into()]);
         assert_eq!(command, ["mdtree", "status"]);
+        let alias = workspace_shorthand_args(["mdtree".into(), "flush".into()]);
+        assert_eq!(alias, ["mdtree", "flush"]);
 
         let directory = tempdir().expect("temporary directory");
         let missing = directory.path().join("missing.mdtree");

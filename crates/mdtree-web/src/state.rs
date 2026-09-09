@@ -1,6 +1,7 @@
 //! Shared application state available to every route and middleware layer.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use mdtree_core::NodeId;
@@ -28,6 +29,8 @@ pub(crate) struct WorkspaceState {
     /// client of this workspace whenever its revision advances, including
     /// changes made by another process, the CLI, or MCP.
     pub(crate) changes: broadcast::Sender<ChangeEvent>,
+    /// Latest workspace revision known to be merged into the primary database file.
+    pub(crate) checkpointed_revision: Arc<AtomicU64>,
 }
 
 /// State shared across every route and middleware layer of one `browse-ui`

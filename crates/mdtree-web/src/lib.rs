@@ -10,7 +10,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use axum::routing::{get, post};
@@ -49,6 +49,37 @@ pub struct BrowseUiOptions {
     pub port: u16,
     /// Runtime-only local embedding-provider configuration.
     pub semantic: WebSemanticConfig,
+}
+
+fn open_workspace_state(
+    source: &WorkspaceSource,
+    selector: Option<&str>,
+) -> anyhow::Result<WorkspaceState> {
+    let store = SqliteStore::open(&source.path)?;
+    let root = resolve_root(&store, selector)?;
+    let name = source
+        .name
+        .clone()
+        .unwrap_or_else(|| default_workspace_name(&source.path));
+    let mut wal_path = source.path.as_os_str().to_owned();
+    wal_path.push("-wal");
+    let checkpoint_ready =
+        std::fs::metadata(PathBuf::from(wal_path)).map_or(true, |metadata| metadata.len() == 0);
+    let revision = store.workspace_revision()?;
+    tracing::debug!(%root, %name, "resolved browse-ui workspace root");
+    let (changes, _) = broadcast::channel(CHANGE_CHANNEL_CAPACITY);
+    Ok(WorkspaceState {
+        store: Arc::new(Mutex::new(store)),
+        path: source.path.clone(),
+        root,
+        name,
+        changes,
+        checkpointed_revision: Arc::new(AtomicU64::new(if checkpoint_ready {
+            revision
+        } else {
+            0
+        })),
+    })
 }
 
 /// Runtime-only Ollama configuration used by semantic web search.
@@ -135,7 +166,6 @@ fn default_workspace_name(path: &std::path::Path) -> String {
 pub async fn run(workspaces: &[WorkspaceSource], options: BrowseUiOptions) -> anyhow::Result<()> {
     let mut workspace_states = Vec::with_capacity(workspaces.len());
     for source in workspaces {
-        let store = SqliteStore::open(&source.path)?;
         // A subtree selector only makes sense for a single workspace; the
         // CLI already rejects combining `--also-workspace` with a selector.
         let selector = if workspaces.len() == 1 {
@@ -143,20 +173,7 @@ pub async fn run(workspaces: &[WorkspaceSource], options: BrowseUiOptions) -> an
         } else {
             None
         };
-        let root = resolve_root(&store, selector)?;
-        let name = source
-            .name
-            .clone()
-            .unwrap_or_else(|| default_workspace_name(&source.path));
-        tracing::debug!(%root, %name, "resolved browse-ui workspace root");
-        let (changes_tx, _) = broadcast::channel(CHANGE_CHANNEL_CAPACITY);
-        workspace_states.push(WorkspaceState {
-            store: Arc::new(Mutex::new(store)),
-            path: source.path.clone(),
-            root,
-            name,
-            changes: changes_tx,
-        });
+        workspace_states.push(open_workspace_state(source, selector)?);
     }
     // The left-hand switcher panel lists workspaces alphabetically by
     // display name rather than command-line order, so callers don't need to
@@ -199,10 +216,15 @@ pub async fn run(workspaces: &[WorkspaceSource], options: BrowseUiOptions) -> an
             .lock()
             .expect("workspace store mutex poisoned")
             .workspace_revision()?;
+        let checkpoint_ready = workspace
+            .checkpointed_revision
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == initial_revision;
         tokio::spawn(change_hub::poll_workspace_revision(
             state.clone(),
             index,
             Arc::new(AtomicU64::new(initial_revision)),
+            Arc::new(AtomicBool::new(checkpoint_ready)),
         ));
     }
     let client_activity = Arc::clone(&state.client_activity);
@@ -214,6 +236,10 @@ pub async fn run(workspaces: &[WorkspaceSource], options: BrowseUiOptions) -> an
         .route("/vendor/easymde.min.js", get(assets::easymde_js))
         .route("/vendor/easymde.min.css", get(assets::easymde_css))
         .route("/api/workspaces", get(api::workspaces))
+        .route(
+            "/api/{workspace}/checkpoint",
+            post(api::checkpoint_workspace),
+        )
         .route("/api/search", get(search::search))
         .route("/api/semantic-index", get(search::semantic_status))
         .route("/api/{workspace}/node/{selector}", get(api::node))

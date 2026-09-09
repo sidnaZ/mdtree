@@ -3,15 +3,17 @@
 //! version, or path logic is duplicated here.
 
 use std::str::FromStr;
+use std::sync::atomic::Ordering;
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use mdtree_core::{Node, NodeId, NodeMetadata, NodeSelector, ReferenceTarget, SemanticError};
-use mdtree_sqlite::{SqliteStore, StoreError};
+use mdtree_sqlite::{checkpoint_workspace as checkpoint_store, SqliteStore, StoreError};
 use serde::Serialize;
 
+use crate::lifecycle::SESSION_HEADER;
 use crate::markdown::render_sanitized_html;
 use crate::state::AppState;
 
@@ -65,6 +67,8 @@ pub(crate) struct WorkspaceSummary {
     /// the metadata editor suggest known types without requiring a node to
     /// be loaded first.
     node_types: Vec<String>,
+    /// Whether all observed changes are merged into the primary database file.
+    checkpoint_ready: bool,
 }
 
 #[derive(Serialize)]
@@ -92,6 +96,8 @@ pub(crate) async fn workspaces(
             root: workspace.root.to_string(),
             relation_types: store.all_relation_types()?,
             node_types: store.all_node_types()?,
+            checkpoint_ready: workspace.checkpointed_revision.load(Ordering::SeqCst)
+                == store.workspace_revision()?,
         });
     }
     Ok(Json(WorkspacesResponse {
@@ -99,6 +105,48 @@ pub(crate) async fn workspaces(
         server_version: env!("CARGO_PKG_VERSION"),
         workspaces,
     }))
+}
+
+/// Authenticates and checkpoints one workspace without stopping the web UI.
+pub(crate) async fn checkpoint_workspace(
+    State(state): State<AppState>,
+    Path(workspace): Path<usize>,
+    headers: HeaderMap,
+) -> Response {
+    let supplied = headers
+        .get(SESSION_HEADER)
+        .and_then(|value| value.to_str().ok());
+    if supplied != Some(&*state.session_credential) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Ok(workspace) = resolve_workspace(&state, workspace) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let result = {
+        let store = workspace
+            .store
+            .lock()
+            .expect("workspace store mutex poisoned");
+        // A writer in another process may commit immediately after the checkpoint.
+        // Credit only the revision that was visible before this checkpoint began;
+        // the revision poller will report any later commit as pending.
+        let revision = store.workspace_revision();
+        checkpoint_store(&store).and_then(|report| {
+            let revision = revision?;
+            Ok((report, revision))
+        })
+    };
+    match result {
+        Ok((report, revision)) => {
+            if report.complete {
+                workspace
+                    .checkpointed_revision
+                    .store(revision, Ordering::SeqCst);
+            }
+            Json(report).into_response()
+        }
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
 }
 
 /// Looks up the workspace addressed by a `{workspace}` path segment.

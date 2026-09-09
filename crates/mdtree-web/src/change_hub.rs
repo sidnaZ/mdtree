@@ -9,7 +9,7 @@
 //! rather than per-node, a change conservatively marks the client's entire
 //! visible scope stale rather than guessing which node changed.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +25,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ChangeEvent {
     pub(crate) revision: u64,
+    pub(crate) checkpoint_ready: bool,
 }
 
 /// Polls one workspace's revision and broadcasts a [`ChangeEvent`] to that
@@ -36,6 +37,7 @@ pub(crate) async fn poll_workspace_revision(
     state: AppState,
     workspace_index: usize,
     last_seen: Arc<AtomicU64>,
+    last_checkpoint_ready: Arc<AtomicBool>,
 ) {
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -47,13 +49,30 @@ pub(crate) async fn poll_workspace_revision(
                 .expect("workspace store mutex poisoned");
             store.workspace_revision().unwrap_or(0)
         };
+        let checkpoint_ready = wal_is_empty(&workspace.path);
+        if checkpoint_ready {
+            workspace
+                .checkpointed_revision
+                .store(current, Ordering::SeqCst);
+        }
         let previous = last_seen.swap(current, Ordering::SeqCst);
-        if current != previous {
-            // No receivers is not an error here: it just means no client is
-            // connected right now to notify.
-            let _ = workspace.changes.send(ChangeEvent { revision: current });
+        let readiness_changed =
+            last_checkpoint_ready.swap(checkpoint_ready, Ordering::SeqCst) != checkpoint_ready;
+        if current != previous || readiness_changed {
+            // No receivers is not an error here: it just means no client is connected.
+            let _ = workspace.changes.send(ChangeEvent {
+                revision: current,
+                checkpoint_ready,
+            });
         }
     }
+}
+
+fn wal_is_empty(path: &std::path::Path) -> bool {
+    let mut wal_path = path.as_os_str().to_owned();
+    wal_path.push("-wal");
+    std::fs::metadata(std::path::PathBuf::from(wal_path))
+        .map_or(true, |metadata| metadata.len() == 0)
 }
 
 #[cfg(test)]
@@ -65,7 +84,11 @@ mod tests {
     fn channel_delivers_to_every_subscriber() {
         let (tx, mut a) = broadcast::channel(CHANGE_CHANNEL_CAPACITY);
         let mut b = tx.subscribe();
-        tx.send(super::ChangeEvent { revision: 7 }).expect("send");
+        tx.send(super::ChangeEvent {
+            revision: 7,
+            checkpoint_ready: false,
+        })
+        .expect("send");
         assert_eq!(a.try_recv().expect("a receives").revision, 7);
         assert_eq!(b.try_recv().expect("b receives").revision, 7);
     }

@@ -1234,6 +1234,7 @@ async fn real_stdio_switches_between_authorized_workspaces_and_resources_follow(
     let client = ().serve(transport).await.expect("protocol initialize");
     let tools = client.peer().list_all_tools().await.expect("tools");
     assert!(tools.iter().any(|tool| tool.name == "switch_workspace"));
+    assert!(tools.iter().any(|tool| tool.name == "checkpoint_workspace"));
 
     let switched = client
         .peer()
@@ -1270,6 +1271,19 @@ async fn real_stdio_switches_between_authorized_workspaces_and_resources_follow(
                 .to_str()
                 .expect("UTF-8 path")
         ));
+
+    let checkpoint = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("checkpoint_workspace"))
+        .await
+        .expect("checkpoint switched workspace");
+    assert_ne!(checkpoint.is_error, Some(true));
+    let checkpoint = tool_json(checkpoint);
+    assert_eq!(checkpoint["complete"], true);
+    assert_eq!(
+        checkpoint["workspace"],
+        serde_json::json!(second.canonicalize().expect("canonical second"))
+    );
 
     let missing = directory.path().join("new.mdtree");
     let selected_missing = client

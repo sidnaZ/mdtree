@@ -394,6 +394,7 @@ async function init() {
       // what changed and already flagged it ourselves.
       suppressNextChangeSweeps: 0,
       loaded: false,
+      checkpointReady: summary.checkpoint_ready,
     });
   }
   setUpPanAndZoom();
@@ -533,6 +534,43 @@ function setUpStatusControls() {
   document.getElementById("control-stop").addEventListener("click", () => {
     stopProgram().catch(reportError);
   });
+  document.getElementById("control-checkpoint").addEventListener("click", () => {
+    checkpointWorkspace().catch(reportError);
+  });
+}
+
+function setCheckpointState(checkpointState) {
+  const element = document.getElementById("checkpoint-state");
+  element.dataset.state = checkpointState;
+  element.title = checkpointState === "ready"
+    ? "Workspace is checkpointed"
+    : checkpointState === "checking"
+      ? "Checkpointing workspace…"
+      : "Workspace has changes not yet checkpointed";
+}
+
+async function checkpointWorkspace() {
+  const workspace = workspaces.get(activeWorkspaceId);
+  if (!workspace) {
+    return;
+  }
+  const button = document.getElementById("control-checkpoint");
+  button.disabled = true;
+  setCheckpointState("checking");
+  try {
+    const response = await fetch(`/api/${activeWorkspaceId}/checkpoint`, {
+      method: "POST",
+      headers: { "x-mdtree-session": sessionCredential },
+    });
+    if (!response.ok) {
+      throw new Error("MDTree could not checkpoint the workspace.");
+    }
+    const report = await response.json();
+    workspace.checkpointReady = report.complete;
+    setCheckpointState(report.complete ? "ready" : "pending");
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // The `dark` class is applied to <html> (rather than relying on
@@ -645,13 +683,27 @@ function connectWebSocket(workspace) {
       ) {
         markLoadedNodesStale(workspace);
       }
+      workspace.checkpointReady = envelope.payload?.checkpoint_ready ?? false;
+      if (workspace.id === activeWorkspaceId) {
+        setCheckpointState(workspace.checkpointReady ? "ready" : "pending");
+      }
       workspace.lastKnownRevision = envelope.revision ?? workspace.lastKnownRevision;
     } else if (envelope.type === "change") {
+      const revisionChanged =
+        envelope.revision == null ||
+        workspace.lastKnownRevision === null ||
+        envelope.revision !== workspace.lastKnownRevision;
+      workspace.checkpointReady = envelope.payload?.checkpoint_ready ?? false;
+      if (workspace.id === activeWorkspaceId) {
+        setCheckpointState(workspace.checkpointReady ? "ready" : "pending");
+      }
       workspace.lastKnownRevision = envelope.revision ?? workspace.lastKnownRevision;
-      if (workspace.suppressNextChangeSweeps > 0) {
-        workspace.suppressNextChangeSweeps -= 1;
-      } else {
-        markLoadedNodesStale(workspace);
+      if (revisionChanged) {
+        if (workspace.suppressNextChangeSweeps > 0) {
+          workspace.suppressNextChangeSweeps -= 1;
+        } else {
+          markLoadedNodesStale(workspace);
+        }
       }
     } else if (envelope.type === "ack" || envelope.type === "reject") {
       // Acks/rejects only ever answer a command the active workspace sent
@@ -889,6 +941,7 @@ async function switchWorkspace(id) {
   state = workspace.state;
   renderWorkspacePanel();
   setConnectionState(isConnected() ? "connected" : "connecting");
+  setCheckpointState(workspace.checkpointReady ? "ready" : "pending");
   if (!workspace.loaded) {
     workspace.loaded = true;
     workspace.state.root = workspace.root;

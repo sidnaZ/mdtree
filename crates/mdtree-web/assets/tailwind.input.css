@@ -315,6 +315,15 @@
     @apply bg-slate-400 dark:bg-slate-500;
   }
 
+  #checkpoint-state[data-state="ready"] .checkpoint-dot {
+    @apply bg-emerald-400;
+  }
+
+  #checkpoint-state[data-state="pending"] .checkpoint-dot,
+  #checkpoint-state[data-state="checking"] .checkpoint-dot {
+    @apply bg-amber-400;
+  }
+
   /* The only bits GitHub-style `prose` typography doesn't cover: a
      positioning context for the copy-code button, and the button itself. */
   .prose pre {

@@ -80,6 +80,40 @@ pub struct DoctorReport {
     pub findings: Vec<DoctorFinding>,
 }
 
+/// Result of merging committed WAL frames into the primary workspace file.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CheckpointReport {
+    /// Whether every eligible WAL frame was checkpointed.
+    pub complete: bool,
+    /// Number of frames left in the WAL after the checkpoint attempt.
+    pub log_frames: u64,
+    /// Number of WAL frames copied into the primary database.
+    pub checkpointed_frames: u64,
+}
+
+/// Checkpoints the workspace WAL and truncates it when no active reader blocks completion.
+pub fn checkpoint_workspace(store: &SqliteStore) -> Result<CheckpointReport, MaintenanceError> {
+    let (busy, log_frames, checkpointed_frames) =
+        store
+            .connection()
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+    let log_frames = u64::try_from(log_frames)
+        .map_err(|_| StoreError::InvalidData("negative WAL frame count".into()))?;
+    let checkpointed_frames = u64::try_from(checkpointed_frames)
+        .map_err(|_| StoreError::InvalidData("negative checkpointed frame count".into()))?;
+    Ok(CheckpointReport {
+        complete: busy == 0 && log_frames == checkpointed_frames,
+        log_frames,
+        checkpointed_frames,
+    })
+}
+
 /// Creates a consistent database backup through `SQLite`'s online backup API.
 pub fn backup_workspace(store: &SqliteStore, destination: &Path) -> Result<(), MaintenanceError> {
     if destination.exists() {
@@ -265,8 +299,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        backup_workspace, check_workspace, doctor_workspace, restore_workspace, CheckStatus,
-        MaintenanceError,
+        backup_workspace, check_workspace, checkpoint_workspace, doctor_workspace,
+        restore_workspace, CheckStatus, MaintenanceError,
     };
     use crate::{create_workspace, SqliteStore};
 
@@ -345,5 +379,29 @@ mod tests {
             .findings
             .iter()
             .any(|finding| finding.code == "rebuild_recommended"));
+    }
+
+    #[test]
+    fn checkpoint_merges_and_truncates_committed_wal_frames() {
+        let directory = tempdir().expect("tempdir");
+        let source = directory.path().join("source.mdtree");
+        let store = workspace(&source);
+        store
+            .connection()
+            .execute(
+                "UPDATE workspace SET created_at=created_at+1 WHERE singleton=1",
+                [],
+            )
+            .expect("write WAL frame");
+
+        let report = checkpoint_workspace(&store).expect("checkpoint");
+        assert!(report.complete, "{report:?}");
+        assert_eq!(report.log_frames, report.checkpointed_frames);
+        assert_eq!(
+            std::fs::metadata(source.with_extension("mdtree-wal"))
+                .expect("WAL metadata")
+                .len(),
+            0
+        );
     }
 }

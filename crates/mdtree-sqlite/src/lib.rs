@@ -17,8 +17,8 @@ pub mod test_support;
 
 pub use connection::{open_connection, open_memory_connection};
 pub use maintenance::{
-    backup_workspace, check_workspace, doctor_workspace, restore_workspace, CheckReport,
-    CheckStatus, DoctorFinding, DoctorReport, MaintenanceError,
+    backup_workspace, check_workspace, checkpoint_workspace, doctor_workspace, restore_workspace,
+    CheckReport, CheckStatus, CheckpointReport, DoctorFinding, DoctorReport, MaintenanceError,
 };
 pub use migrations::{migrate, MigrationError, LATEST_SCHEMA_VERSION, WORKSPACE_FORMAT_VERSION};
 pub use mutation_assembly::{prepare_node_mutation, NodeMutationDraft, PreparedNodeMutation};

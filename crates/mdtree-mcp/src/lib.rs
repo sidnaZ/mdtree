@@ -51,7 +51,7 @@ pub struct McpSemanticConfig {
 
 const MAX_ITEMS: u32 = 100;
 const MAX_BYTES: usize = 1_048_576;
-const MCP_INSTRUCTIONS: &str = "Use only tool names and schemas exposed by this server. Preserve the complete client-exposed function name: if tools are namespaced, invoke them through that namespace; never emit a bare name such as children or subtree. Never invent, concatenate, or infer tool names. For existing workspaces, call workspace_status first and verify its path. If that path does not match the requested workspace, call switch_workspace when exposed, then verify workspace_status again; use the CLI only when switching is unavailable or rejected. To list all nodes, pass its root_id as subtree's selector and follow every next_cursor until complete; use children for direct children and likewise follow pagination. For queue inspection or optimistic-concurrency checks, request the queue or concurrency projection instead of transferring full Markdown. The mdtree://tree and mdtree://references resources intentionally serialize complete whole-workspace collections and may be large; use bounded tools for targeted reads. Search defaults to lexical mode. Before semantic or hybrid search, inspect semantic_index_status; semantic provider failures are explicit, and hybrid uses lexical fallback only when hybrid_fallback is true. Semantic index lifecycle tools are registered only in write mode and have equivalent CLI commands. For an uninitialized workspace, use initialize_workspace only when exposed and follow its schema. Do not claim a tool unavailable unless a real call returns that error. Never use the MDTree CLI when an equivalent MCP tool is exposed. ";
+const MCP_INSTRUCTIONS: &str = "Use only tool names and schemas exposed by this server. Preserve the complete client-exposed function name: if tools are namespaced, invoke them through that namespace; never emit a bare name such as children or subtree. Never invent, concatenate, or infer tool names. For existing workspaces, call workspace_status first and verify its path. If that path does not match the requested workspace, call switch_workspace when exposed, then verify workspace_status again; use the CLI only when switching is unavailable or rejected. To list all nodes, pass its root_id as subtree's selector and follow every next_cursor until complete; use children for direct children and likewise follow pagination. For queue inspection or optimistic-concurrency checks, request the queue or concurrency projection instead of transferring full Markdown. The mdtree://tree and mdtree://references resources intentionally serialize complete whole-workspace collections and may be large; use bounded tools for targeted reads. Search defaults to lexical mode. Before semantic or hybrid search, inspect semantic_index_status; semantic provider failures are explicit, and hybrid uses lexical fallback only when hybrid_fallback is true. Semantic index lifecycle tools are registered only in write mode and have equivalent CLI commands. Before staging a workspace database in Git after writes, call checkpoint_workspace when exposed so committed WAL changes are merged into the primary file. For an uninitialized workspace, use initialize_workspace only when exposed and follow its schema. Do not claim a tool unavailable unless a real call returns that error. Never use the MDTree CLI when an equivalent MCP tool is exposed. ";
 
 #[derive(Clone)]
 pub struct MdtreeServer {
@@ -2237,6 +2237,10 @@ mod tests {
         assert!(write_names
             .iter()
             .any(|name| name == "initialize_workspace"));
+        assert!(write_names
+            .iter()
+            .any(|name| name == "checkpoint_workspace"));
+        assert!(!read_names.iter().any(|name| name == "checkpoint_workspace"));
         assert!(write_names.iter().any(|name| name == "create_node"));
         assert!(write_names.iter().any(|name| name == "update_node"));
         assert!(write_names.iter().any(|name| name == "rename_node"));
@@ -2268,7 +2272,7 @@ mod tests {
         assert!(read_names
             .iter()
             .any(|name| name == "semantic_index_status"));
-        assert_eq!(write_names.len(), read_names.len() + 18);
+        assert_eq!(write_names.len(), read_names.len() + 19);
         assert!(read_only
             .get_info()
             .instructions

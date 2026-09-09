@@ -144,11 +144,32 @@
               class="icon-rail-button text-sm font-semibold"
             >?</button>
             <button
+              id="control-checkpoint"
+              type="button"
+              title="Checkpoint workspace"
+              aria-label="Checkpoint workspace"
+              class="icon-rail-button mt-auto"
+            >
+              <svg viewBox="0 0 20 20" fill="none" class="h-4 w-4" stroke="currentColor" stroke-width="1.6">
+                <path d="M10 2v5M10 13v5" stroke-linecap="round" />
+                <circle cx="10" cy="10" r="3" />
+                <path d="M3 10h4M13 10h4" stroke-linecap="round" />
+              </svg>
+            </button>
+            <span
+              id="checkpoint-state"
+              data-state="checking"
+              title="Checking workspace checkpoint"
+              class="flex h-9 w-9 flex-none items-center justify-center"
+            >
+              <span class="checkpoint-dot inline-block h-2.5 w-2.5 rounded-full ring-4 ring-slate-100 dark:ring-slate-800"></span>
+            </span>
+            <button
               id="control-stop"
               type="button"
               title="Stop MDTree"
               aria-label="Stop MDTree"
-              class="icon-rail-button icon-rail-button-danger mt-auto"
+              class="icon-rail-button icon-rail-button-danger"
             >
               <svg viewBox="0 0 20 20" fill="none" class="h-4 w-4" stroke="currentColor" stroke-width="1.6">
                 <path d="M10 3v6" stroke-linecap="round" />

@@ -558,7 +558,7 @@ impl MdtreeServer {
             "revision_metadata": ["author", "change_summary"],
             "mutation_tools": [
                 "initialize_workspace", "create_node", "update_node", "rename_node", "move_node", "clone_subtree", "atomic_tree_batch", "mutation_batch", "reorder_node",
-                "remove_node", "set_references", "restore_version", "semantic_index_build", "semantic_index_resume", "semantic_index_retry", "semantic_index_clear"
+                "remove_node", "set_references", "restore_version", "semantic_index_build", "semantic_index_resume", "semantic_index_retry", "semantic_index_clear", "checkpoint_workspace"
             ],
             "filesystem_tools": ["export_node"],
             "idempotency": "persisted_operation_receipts",
@@ -566,6 +566,24 @@ impl MdtreeServer {
             "post_write_validation": true
         });
         Ok(CallToolResult::success(vec![ContentBlock::json(value)?]))
+    }
+
+    /// Checkpoints the active workspace WAL into its primary database file.
+    #[tool(
+        description = "Checkpoint the active MDTree workspace WAL into its primary database file"
+    )]
+    async fn checkpoint_workspace(&self) -> Result<CallToolResult, ErrorData> {
+        // Resolve the path before locking the store because both use the shared binding lock.
+        let workspace = self.workspace_path()?;
+        let store = self.store()?;
+        let report = mdtree_sqlite::checkpoint_workspace(&store)
+            .map_err(|error| crate::mcp_error(error.to_string()))?;
+        crate::json_result(serde_json::json!({
+            "workspace": workspace,
+            "complete": report.complete,
+            "log_frames": report.log_frames,
+            "checkpointed_frames": report.checkpointed_frames
+        }))
     }
 
     /// Creates the configured workspace with exactly one root node.
