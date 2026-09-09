@@ -1,6 +1,7 @@
 //! Stable command-line adapter for `MDTree` services.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode, Stdio};
@@ -160,7 +161,12 @@ impl PaginationArgs {
 
 /// Local-first Markdown tree manager.
 #[derive(Debug, Parser)]
-#[command(name = "mdtree", version, about)]
+#[command(
+    name = "mdtree",
+    version,
+    about,
+    after_help = "Pass an existing workspace file as the only argument to open it directly:\n  mdtree project.mdtree"
+)]
 pub struct Cli {
     /// Workspace database path (or `MDTREE_WORKSPACE`; defaults to `.mdtree`).
     #[arg(long, global = true, env = "MDTREE_WORKSPACE")]
@@ -812,13 +818,35 @@ pub fn main_entry() -> ExitCode {
         .with_writer(io::stderr)
         .with_ansi(false)
         .try_init();
-    match execute(&Cli::parse(), &mut io::stdout()) {
+    let args = workspace_shorthand_args(std::env::args_os());
+    match execute(&Cli::parse_from(args), &mut io::stdout()) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             let _ = writeln!(io::stderr(), "{error}");
             ExitCode::from(EXIT_OPERATIONAL)
         }
     }
+}
+
+fn workspace_shorthand_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    let args = args.into_iter().collect::<Vec<_>>();
+    if args.len() != 2 {
+        return args;
+    }
+    let candidate = &args[1];
+    let is_subcommand = candidate.to_str().is_some_and(|candidate| {
+        Cli::command()
+            .get_subcommands()
+            .any(|command| command.get_name() == candidate)
+    });
+    if is_subcommand || !Path::new(candidate).is_file() {
+        return args;
+    }
+    vec![
+        args[0].clone(),
+        OsString::from("--workspace"),
+        candidate.clone(),
+    ]
 }
 
 /// Executes a parsed command against an injected output writer.
@@ -3016,9 +3044,37 @@ mod tests {
 
     use super::{
         browse_line_mode, detail_scroll_offset, detail_window, emit, execute,
-        export_complete_workspace_snapshot, Cli, Command, NavigationRelation, OutputFormat,
-        PaginationArgs, SnapshotFormat, EXIT_OK,
+        export_complete_workspace_snapshot, workspace_shorthand_args, Cli, Command,
+        NavigationRelation, OutputFormat, PaginationArgs, SnapshotFormat, EXIT_OK,
     };
+
+    #[test]
+    fn existing_single_file_argument_selects_the_workspace() {
+        let directory = tempdir().expect("temporary directory");
+        let workspace = directory.path().join("project.mdtree");
+        std::fs::File::create(&workspace).expect("workspace placeholder");
+
+        let cli = Cli::try_parse_from(workspace_shorthand_args([
+            "mdtree".into(),
+            workspace.clone().into_os_string(),
+        ]))
+        .expect("workspace shorthand");
+
+        assert_eq!(cli.workspace.as_deref(), Some(workspace.as_path()));
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn workspace_shorthand_preserves_commands_and_missing_paths() {
+        let command = workspace_shorthand_args(["mdtree".into(), "status".into()]);
+        assert_eq!(command, ["mdtree", "status"]);
+
+        let directory = tempdir().expect("temporary directory");
+        let missing = directory.path().join("missing.mdtree");
+        let missing_args =
+            workspace_shorthand_args(["mdtree".into(), missing.clone().into_os_string()]);
+        assert_eq!(missing_args, ["mdtree".into(), missing.into_os_string()]);
+    }
 
     #[test]
     fn cli_pagination_flags_use_the_shared_opaque_contract() {

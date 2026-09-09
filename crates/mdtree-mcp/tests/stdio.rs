@@ -489,7 +489,7 @@ async fn real_stdio_reuses_composite_scale_fixture_for_wide_and_bounded_reads() 
         .peer()
         .call_tool(
             CallToolRequestParams::new("batch_nodes").with_arguments(
-                serde_json::json!({"selectors":[
+                serde_json::json!({"projection":"queue","selectors":[
                     fixture.root_id.to_string(),
                     "wide-00000",
                     fixture.root_id.to_string(),
@@ -507,6 +507,9 @@ async fn real_stdio_reuses_composite_scale_fixture_for_wide_and_bounded_reads() 
     assert_eq!(batch[0]["node"]["id"], fixture.root_id.to_string());
     assert_eq!(batch[2]["node"]["id"], fixture.root_id.to_string());
     assert_eq!(batch[3]["error"]["code"], "not_found");
+    assert!(batch[0]["node"].get("title").is_some());
+    assert!(batch[0]["node"].get("version").is_some());
+    assert!(batch[0]["node"].get("markdown_content").is_none());
     let child_groups = client
         .peer()
         .call_tool(
@@ -2212,7 +2215,7 @@ async fn real_stdio_write_mode_requires_explicit_flag() {
             CallToolRequestParams::new("remove_node").with_arguments(
                 serde_json::json!({
                     "selector": "01JZ8Q5CWPN8T7KPN5A1V9B701",
-                    "expected_version": 1,
+                    "expected_version": 2,
                     "options": {"dry_run": true}
                 })
                 .as_object()
@@ -2230,7 +2233,7 @@ async fn real_stdio_write_mode_requires_explicit_flag() {
                 serde_json::json!({
                     "operation_id": "remove-collision-node",
                     "selector": "01JZ8Q5CWPN8T7KPN5A1V9B701",
-                    "expected_version": 1,
+                    "expected_version": 2,
                     "confirm": true,
                     "options": {"validate_after_write": true}
                 })

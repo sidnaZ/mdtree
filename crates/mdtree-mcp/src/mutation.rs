@@ -1295,9 +1295,16 @@ impl MdtreeServer {
                 "destination parent does not accept the node type",
             ));
         }
-        let destination_children = store
-            .children(destination_id)
-            .map_err(crate::store_error)?
+        let current_destination_children =
+            store.children(destination_id).map_err(crate::store_error)?;
+        let sibling_orders_normalized =
+            current_destination_children
+                .iter()
+                .enumerate()
+                .all(|(index, node)| {
+                    node.fields().sibling_order == u32::try_from(index).unwrap_or(u32::MAX)
+                });
+        let destination_children = current_destination_children
             .into_iter()
             .filter(|node| node.id() != id)
             .collect::<Vec<_>>();
@@ -1339,7 +1346,8 @@ impl MdtreeServer {
             &SystemUlidGenerator,
         )
         .map_err(crate::store_error)?;
-        let semantic_no_op = prepared.node.fields().revision_hash == fields.revision_hash;
+        let node_semantic_no_op = prepared.node.fields().revision_hash == fields.revision_hash;
+        let semantic_no_op = node_semantic_no_op && sibling_orders_normalized;
         let status = if semantic_no_op {
             MutationStatus::NoOp
         } else if params.options.dry_run {
@@ -1365,7 +1373,7 @@ impl MdtreeServer {
             mutation: mutation_result(
                 &prepared,
                 status,
-                if semantic_no_op {
+                if node_semantic_no_op {
                     fields.version
                 } else {
                     proposed.version
@@ -1422,7 +1430,11 @@ impl MdtreeServer {
             fields.content_hash.as_bytes(),
             &params.precondition,
         )?;
-        let sibling_count = store.children(parent_id).map_err(crate::store_error)?.len();
+        let siblings = store.children(parent_id).map_err(crate::store_error)?;
+        let sibling_orders_normalized = siblings.iter().enumerate().all(|(index, node)| {
+            node.fields().sibling_order == u32::try_from(index).unwrap_or(u32::MAX)
+        });
+        let sibling_count = siblings.len();
         let order = params
             .sibling_order
             .min(u32::try_from(sibling_count.saturating_sub(1)).unwrap_or(u32::MAX));
@@ -1447,7 +1459,8 @@ impl MdtreeServer {
             &SystemUlidGenerator,
         )
         .map_err(crate::store_error)?;
-        let semantic_no_op = prepared.node.fields().revision_hash == fields.revision_hash;
+        let node_semantic_no_op = prepared.node.fields().revision_hash == fields.revision_hash;
+        let semantic_no_op = node_semantic_no_op && sibling_orders_normalized;
         let status = if semantic_no_op {
             MutationStatus::NoOp
         } else if params.options.dry_run {
@@ -1464,7 +1477,7 @@ impl MdtreeServer {
         let result = mutation_result(
             &prepared,
             status,
-            if semantic_no_op {
+            if node_semantic_no_op {
                 fields.version
             } else {
                 fields.version + 1

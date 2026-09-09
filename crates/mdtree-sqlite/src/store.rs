@@ -1141,6 +1141,20 @@ impl SqliteStore {
         if dry_run {
             return Ok(result);
         }
+        let normalization_cause = if let Some(change) = moves.first() {
+            change.prepared.revision.clone()
+        } else {
+            let removal = removals.first().ok_or_else(|| {
+                StoreError::Invariant("tree batch has no normalization cause".into())
+            })?;
+            let current = self
+                .get(removal.node_id)?
+                .ok_or_else(|| StoreError::NotFound(removal.node_id.to_string()))?;
+            self.revision(removal.node_id, current.fields().version)?
+                .ok_or_else(|| {
+                    StoreError::Invariant("removed node has no current revision".into())
+                })?
+        };
         let transaction = self.connection.transaction()?;
         let mut affected_parents = old_parents;
         for change in moves {
@@ -1175,14 +1189,7 @@ impl SqliteStore {
             )?;
         }
         for parent in affected_parents {
-            transaction.execute(
-                "WITH ordered AS (
-                    SELECT id,ROW_NUMBER() OVER (ORDER BY sibling_order,id)-1 AS normalized
-                    FROM nodes WHERE parent_id=?1
-                 ) UPDATE nodes SET sibling_order=(SELECT normalized FROM ordered WHERE ordered.id=nodes.id)
-                 WHERE id IN (SELECT id FROM ordered)",
-                [parent.to_string()],
-            )?;
+            normalize_parent_siblings(&transaction, parent, &normalization_cause)?;
             refresh_fts_context(&transaction, parent)?;
         }
         transaction.commit()?;
@@ -1335,6 +1342,34 @@ impl SqliteStore {
         if dry_run {
             return Ok(result);
         }
+        let normalization_cause = if let Some(revision) =
+            operations.iter().find_map(|operation| match operation {
+                PreparedBatchOperation::Create(prepared)
+                | PreparedBatchOperation::Replace { prepared, .. }
+                | PreparedBatchOperation::SetReferences { prepared, .. } => {
+                    Some(prepared.revision.clone())
+                }
+                PreparedBatchOperation::Remove(_) => None,
+            }) {
+            revision
+        } else {
+            let removal = operations
+                .iter()
+                .find_map(|operation| match operation {
+                    PreparedBatchOperation::Remove(removal) => Some(removal),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    StoreError::Invariant("mutation batch has no normalization cause".into())
+                })?;
+            let current = self
+                .get(removal.node_id)?
+                .ok_or_else(|| StoreError::NotFound(removal.node_id.to_string()))?;
+            self.revision(removal.node_id, current.fields().version)?
+                .ok_or_else(|| {
+                    StoreError::Invariant("removed node has no current revision".into())
+                })?
+        };
         let transaction = self.connection.transaction()?;
         for operation in operations {
             match operation {
@@ -1385,10 +1420,7 @@ impl SqliteStore {
             }
         }
         for parent in affected_parents {
-            transaction.execute(
-                "WITH ordered AS (SELECT id,ROW_NUMBER() OVER (ORDER BY sibling_order,id)-1 AS normalized FROM nodes WHERE parent_id=?1) UPDATE nodes SET sibling_order=(SELECT normalized FROM ordered WHERE ordered.id=nodes.id) WHERE id IN (SELECT id FROM ordered)",
-                [parent.to_string()],
-            )?;
+            normalize_parent_siblings(&transaction, parent, &normalization_cause)?;
             refresh_fts_context(&transaction, parent)?;
         }
         transaction.commit()?;
@@ -1657,14 +1689,21 @@ impl SqliteStore {
 
     /// Moves a subtree after rejecting root moves and cycles.
     pub fn move_subtree(&mut self, change: NodeChange<'_>) -> Result<MutationOutcome, StoreError> {
-        let Some(parent) = change.node.parent_id() else {
+        let current = self
+            .get(change.node.id())?
+            .ok_or_else(|| StoreError::NotFound(change.node.id().to_string()))?;
+        check_version(&current, change.expected_version)?;
+        let Some(source_parent) = current.parent_id() else {
+            return Err(StoreError::Invariant("root cannot be moved".into()));
+        };
+        let Some(destination_parent) = change.node.parent_id() else {
             return Err(StoreError::Invariant("root cannot be moved".into()));
         };
         let cycle: bool = self.connection.query_row(
             "WITH RECURSIVE x(id) AS (SELECT id FROM nodes WHERE id=?1
              UNION ALL SELECT n.id FROM nodes n JOIN x ON n.parent_id=x.id)
              SELECT EXISTS(SELECT 1 FROM x WHERE id=?2)",
-            params![change.node.id().to_string(), parent.to_string()],
+            params![change.node.id().to_string(), destination_parent.to_string()],
             |row| row.get(0),
         )?;
         if cycle {
@@ -1672,7 +1711,47 @@ impl SqliteStore {
                 "cannot move below the same subtree".into(),
             ));
         }
-        self.replace_node(change, false)
+        if source_parent == destination_parent {
+            return self.reorder_node(change);
+        }
+        validate_next_revision(change)?;
+
+        let source_siblings = self
+            .children(source_parent)?
+            .into_iter()
+            .filter(|node| node.id() != current.id())
+            .collect::<Vec<_>>();
+        let mut destination_siblings = self
+            .children(destination_parent)?
+            .into_iter()
+            .filter(|node| node.id() != current.id())
+            .collect::<Vec<_>>();
+        let requested_index = usize::try_from(change.node.fields().sibling_order)
+            .unwrap_or(usize::MAX)
+            .min(destination_siblings.len());
+        if change.node.fields().sibling_order != u32::try_from(requested_index).unwrap_or(u32::MAX)
+        {
+            return Err(StoreError::Invariant(
+                "move position exceeds the destination child count".into(),
+            ));
+        }
+        destination_siblings.insert(requested_index, current);
+
+        let transaction = self.connection.transaction()?;
+        update_node(&transaction, change.node, change.expected_version)?;
+        insert_revision(&transaction, change.revision)?;
+        replace_derived(&transaction, change.node.id(), change.derived)?;
+        normalize_siblings(&transaction, &source_siblings, None, change.revision)?;
+        normalize_siblings(
+            &transaction,
+            &destination_siblings,
+            Some(change),
+            change.revision,
+        )?;
+        refresh_fts_context(&transaction, source_parent)?;
+        refresh_fts_context(&transaction, destination_parent)?;
+        transaction.commit()?;
+        Ok(MutationOutcome::Applied)
     }
 
     /// Reorders with the same versioned atomic contract.
@@ -1699,9 +1778,6 @@ impl SqliteStore {
         let requested_index = usize::try_from(change.node.fields().sibling_order)
             .unwrap_or(usize::MAX)
             .min(siblings.len().saturating_sub(1));
-        if current_index == requested_index {
-            return Ok(MutationOutcome::NoOp);
-        }
         if change.node.fields().sibling_order != u32::try_from(requested_index).unwrap_or(u32::MAX)
         {
             return Err(StoreError::Invariant(
@@ -1711,20 +1787,15 @@ impl SqliteStore {
 
         let moved = siblings.remove(current_index);
         siblings.insert(requested_index, moved);
-        let transaction = self.connection.transaction()?;
-        for (index, sibling) in siblings.iter().enumerate() {
-            let sibling_order = u32::try_from(index)
-                .map_err(|_| StoreError::InvalidData("sibling position".into()))?;
-            if sibling.id() == change.node.id() {
-                update_node(&transaction, change.node, change.expected_version)?;
-                insert_revision(&transaction, change.revision)?;
-                replace_derived(&transaction, change.node.id(), change.derived)?;
-            } else if sibling.fields().sibling_order != sibling_order {
-                let (node, revision) = reordered_sibling(sibling, sibling_order, change.revision)?;
-                update_node(&transaction, &node, sibling.fields().version)?;
-                insert_revision(&transaction, &revision)?;
-            }
+        let requires_normalization = siblings.iter().enumerate().any(|(index, sibling)| {
+            sibling.fields().sibling_order != u32::try_from(index).unwrap_or(u32::MAX)
+        });
+        let moved_changed = current.fields().revision_hash != change.node.fields().revision_hash;
+        if !requires_normalization && !moved_changed {
+            return Ok(MutationOutcome::NoOp);
         }
+        let transaction = self.connection.transaction()?;
+        normalize_siblings(&transaction, &siblings, Some(change), change.revision)?;
         transaction.commit()?;
         Ok(MutationOutcome::Applied)
     }
@@ -2466,6 +2537,47 @@ fn reordered_sibling(
     Ok((node, revision))
 }
 
+fn normalize_siblings(
+    transaction: &Transaction<'_>,
+    siblings: &[Node],
+    selected_change: Option<NodeChange<'_>>,
+    cause: &NodeRevision,
+) -> Result<(), StoreError> {
+    for (index, sibling) in siblings.iter().enumerate() {
+        let sibling_order =
+            u32::try_from(index).map_err(|_| StoreError::InvalidData("sibling position".into()))?;
+        if let Some(change) = selected_change.filter(|change| sibling.id() == change.node.id()) {
+            // Cross-parent moves write the selected node before normalizing both
+            // sibling sets. Reorders write it here only when its head changes.
+            if sibling.parent_id() == change.node.parent_id()
+                && sibling.fields().revision_hash != change.node.fields().revision_hash
+            {
+                update_node(transaction, change.node, change.expected_version)?;
+                insert_revision(transaction, change.revision)?;
+                replace_derived(transaction, change.node.id(), change.derived)?;
+            }
+        } else if sibling.fields().sibling_order != sibling_order {
+            let (node, revision) = reordered_sibling(sibling, sibling_order, cause)?;
+            update_node(transaction, &node, sibling.fields().version)?;
+            insert_revision(transaction, &revision)?;
+        }
+    }
+    Ok(())
+}
+
+fn normalize_parent_siblings(
+    transaction: &Transaction<'_>,
+    parent_id: NodeId,
+    cause: &NodeRevision,
+) -> Result<(), StoreError> {
+    let siblings = query_nodes(
+        transaction,
+        &format!("{SELECT_NODE} WHERE n.parent_id=?1 ORDER BY n.sibling_order,n.id"),
+        [parent_id.to_string()],
+    )?;
+    normalize_siblings(transaction, &siblings, None, cause)
+}
+
 fn canonical_revision_hash(node: &Node) -> Result<NodeHash, StoreError> {
     let fields = node.fields();
     hash_revision(RevisionHashInput {
@@ -2765,6 +2877,21 @@ mod tests {
         store
             .create_node(node, &revision(node), &derived(node, seed))
             .expect("node creation");
+    }
+
+    fn assert_canonical_revision(store: &SqliteStore, node_id: NodeId) {
+        let current = store.get(node_id).expect("read node").expect("node");
+        assert_eq!(
+            super::canonical_revision_hash(&current).expect("canonical revision hash"),
+            current.fields().revision_hash
+        );
+        let latest = store
+            .revisions(node_id)
+            .expect("revision history")
+            .pop()
+            .expect("latest revision");
+        assert_eq!(latest.version, current.fields().version);
+        assert_eq!(latest.revision_hash, current.fields().revision_hash);
     }
 
     #[test]
@@ -3371,7 +3498,7 @@ mod tests {
             Some(destination.id()),
             "Area",
             "area",
-            7,
+            0,
             3,
         );
         let reordered_revision = revision(&reordered);
@@ -3398,14 +3525,14 @@ mod tests {
         assert!(fixture.store.remove_subtree(root.id(), 1, false).is_err());
         let impact = fixture
             .store
-            .remove_subtree(area.id(), 2, true)
+            .remove_subtree(area.id(), 3, true)
             .expect("dry run");
         assert_eq!(impact.node_count, 2);
         assert!(!impact.deleted);
         assert!(
             fixture
                 .store
-                .remove_subtree(area.id(), 2, false)
+                .remove_subtree(area.id(), 3, false)
                 .expect("delete")
                 .deleted
         );
@@ -3510,6 +3637,153 @@ mod tests {
     }
 
     #[test]
+    fn move_normalizes_source_and_destination_siblings_atomically() {
+        let mut fixture = fixture();
+        let root = fixture.store.root().expect("root");
+        let source = node(
+            "01JZ8Q5CWPN8T7KPN5A1V9B6XN",
+            Some(root.id()),
+            "Source",
+            "source",
+            0,
+            1,
+        );
+        let destination = node(
+            "01JZ8Q5CWPN8T7KPN5A1V9B6XP",
+            Some(root.id()),
+            "Destination",
+            "destination",
+            1,
+            1,
+        );
+        create(&mut fixture.store, &source, 100);
+        create(&mut fixture.store, &destination, 101);
+        let child_ids = [
+            "01JZ8Q5CWPN8T7KPN5A1V9B6XQ",
+            "01JZ8Q5CWPN8T7KPN5A1V9B6XR",
+            "01JZ8Q5CWPN8T7KPN5A1V9B6XS",
+        ];
+        for (order, raw_id) in child_ids.iter().enumerate() {
+            let child = node(
+                raw_id,
+                Some(source.id()),
+                &format!("Source {order}"),
+                &format!("source-{order}"),
+                u32::try_from(order).expect("order"),
+                1,
+            );
+            create(&mut fixture.store, &child, 200 + order as u64);
+        }
+        for (order, raw_id) in ["01JZ8Q5CWPN8T7KPN5A1V9B6XT", "01JZ8Q5CWPN8T7KPN5A1V9B6XV"]
+            .iter()
+            .enumerate()
+        {
+            let child = node(
+                raw_id,
+                Some(destination.id()),
+                &format!("Destination {order}"),
+                &format!("destination-{order}"),
+                u32::try_from(order).expect("order"),
+                1,
+            );
+            create(&mut fixture.store, &child, 300 + order as u64);
+        }
+
+        let current = fixture
+            .store
+            .get(id(child_ids[1]))
+            .expect("read")
+            .expect("moved child");
+        let moved = node(
+            child_ids[1],
+            Some(destination.id()),
+            "Source 1",
+            "source-1",
+            0,
+            2,
+        );
+        let moved_revision = revision(&moved);
+        let moved_derived = derived(&moved, 400);
+        assert_eq!(
+            fixture
+                .store
+                .move_subtree(NodeChange {
+                    node: &moved,
+                    expected_version: current.fields().version,
+                    revision: &moved_revision,
+                    derived: &moved_derived,
+                })
+                .expect("move"),
+            MutationOutcome::Applied
+        );
+
+        for parent in [source.id(), destination.id()] {
+            let children = fixture.store.children(parent).expect("children");
+            assert!(children.iter().enumerate().all(|(index, child)| {
+                child.fields().sibling_order == u32::try_from(index).expect("order")
+            }));
+        }
+        let integrity = fixture.store.validate_integrity().expect("integrity");
+        assert!(
+            integrity
+                .findings
+                .iter()
+                .all(|finding| !finding.detail.contains("sibling order")),
+            "{integrity:?}"
+        );
+    }
+
+    #[test]
+    fn reorder_repairs_colliding_persisted_orders_at_the_canonical_position() {
+        let mut fixture = fixture();
+        let root = fixture.store.root().expect("root");
+        let alpha = node(
+            "01JZ8Q5CWPN8T7KPN5A1V9B6XN",
+            Some(root.id()),
+            "Alpha",
+            "alpha",
+            0,
+            1,
+        );
+        let bravo = node(
+            "01JZ8Q5CWPN8T7KPN5A1V9B6XP",
+            Some(root.id()),
+            "Bravo",
+            "bravo",
+            0,
+            1,
+        );
+        create(&mut fixture.store, &alpha, 100);
+        create(&mut fixture.store, &bravo, 101);
+
+        let current = fixture.store.get(bravo.id()).expect("read").expect("bravo");
+        let prepared = prepared_reorder(&current, 1, 200);
+        assert_eq!(
+            fixture
+                .store
+                .reorder_node(prepared.change(current.fields().version))
+                .expect("repair reorder"),
+            MutationOutcome::Applied
+        );
+        let children = fixture.store.children(root.id()).expect("children");
+        assert_eq!(
+            children
+                .iter()
+                .map(|child| child.fields().sibling_order)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+        let integrity = fixture.store.validate_integrity().expect("integrity");
+        assert!(
+            integrity
+                .findings
+                .iter()
+                .all(|finding| !finding.detail.contains("sibling order")),
+            "{integrity:?}"
+        );
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)]
     fn focused_and_heterogeneous_batches_are_atomic_and_dry_runnable() {
         let mut fixture = fixture();
@@ -3605,14 +3879,21 @@ mod tests {
             Some(destination.id())
         );
         assert!(fixture.store.get(trash.id()).expect("trash").is_none());
+        assert_canonical_revision(&fixture.store, right.id());
+        assert_canonical_revision(&fixture.store, destination.id());
 
+        let current_right = fixture
+            .store
+            .get(right.id())
+            .expect("right")
+            .expect("right");
         let renamed = node(
             "01JZ8Q5CWPN8T7KPN5A1V9B702",
             Some(root.id()),
             "Renamed",
             "renamed",
             0,
-            2,
+            current_right.fields().version + 1,
         );
         let created = node(
             "01JZ8Q5CWPN8T7KPN5A1V9B705",
@@ -3629,7 +3910,7 @@ mod tests {
                     revision: revision(&renamed),
                     derived: derived(&renamed, 300),
                 },
-                expected_version: 1,
+                expected_version: current_right.fields().version,
             },
             PreparedBatchOperation::Create(PreparedNodeMutation {
                 node: created.clone(),
@@ -3662,14 +3943,20 @@ mod tests {
             "Renamed"
         );
         assert!(fixture.store.get(created.id()).expect("created").is_some());
+        assert_canonical_revision(&fixture.store, created.id());
 
+        let current_renamed = fixture
+            .store
+            .get(right.id())
+            .expect("renamed")
+            .expect("renamed");
         let rolled_back = node(
             "01JZ8Q5CWPN8T7KPN5A1V9B702",
             Some(root.id()),
             "Rolled Back",
             "rolled-back",
             0,
-            3,
+            current_renamed.fields().version + 1,
         );
         let broken = node(
             "01JZ8Q5CWPN8T7KPN5A1V9B706",
@@ -3688,7 +3975,7 @@ mod tests {
                     revision: revision(&rolled_back),
                     derived: derived(&rolled_back, 600),
                 },
-                expected_version: 2,
+                expected_version: current_renamed.fields().version,
             },
             PreparedBatchOperation::Create(PreparedNodeMutation {
                 node: broken.clone(),

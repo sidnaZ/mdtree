@@ -51,7 +51,7 @@ pub struct McpSemanticConfig {
 
 const MAX_ITEMS: u32 = 100;
 const MAX_BYTES: usize = 1_048_576;
-const MCP_INSTRUCTIONS: &str = "Use only tool names and schemas exposed by this server. Preserve the complete client-exposed function name: if tools are namespaced, invoke them through that namespace; never emit a bare name such as children or subtree. Never invent, concatenate, or infer tool names. For existing workspaces, call workspace_status first and verify its path. If that path does not match the requested workspace, call switch_workspace when exposed, then verify workspace_status again; use the CLI only when switching is unavailable or rejected. To list all nodes, pass its root_id as subtree's selector and follow every next_cursor until complete; use children for direct children and likewise follow pagination. The mdtree://tree and mdtree://references resources intentionally serialize complete whole-workspace collections and may be large; use bounded tools for targeted reads. Search defaults to lexical mode. Before semantic or hybrid search, inspect semantic_index_status; semantic provider failures are explicit, and hybrid uses lexical fallback only when hybrid_fallback is true. Semantic index lifecycle tools are registered only in write mode and have equivalent CLI commands. For an uninitialized workspace, use initialize_workspace only when exposed and follow its schema. Do not claim a tool unavailable unless a real call returns that error. Never use the MDTree CLI when an equivalent MCP tool is exposed. ";
+const MCP_INSTRUCTIONS: &str = "Use only tool names and schemas exposed by this server. Preserve the complete client-exposed function name: if tools are namespaced, invoke them through that namespace; never emit a bare name such as children or subtree. Never invent, concatenate, or infer tool names. For existing workspaces, call workspace_status first and verify its path. If that path does not match the requested workspace, call switch_workspace when exposed, then verify workspace_status again; use the CLI only when switching is unavailable or rejected. To list all nodes, pass its root_id as subtree's selector and follow every next_cursor until complete; use children for direct children and likewise follow pagination. For queue inspection or optimistic-concurrency checks, request the queue or concurrency projection instead of transferring full Markdown. The mdtree://tree and mdtree://references resources intentionally serialize complete whole-workspace collections and may be large; use bounded tools for targeted reads. Search defaults to lexical mode. Before semantic or hybrid search, inspect semantic_index_status; semantic provider failures are explicit, and hybrid uses lexical fallback only when hybrid_fallback is true. Semantic index lifecycle tools are registered only in write mode and have equivalent CLI commands. For an uninitialized workspace, use initialize_workspace only when exposed and follow its schema. Do not claim a tool unavailable unless a real call returns that error. Never use the MDTree CLI when an equivalent MCP tool is exposed. ";
 
 #[derive(Clone)]
 pub struct MdtreeServer {
@@ -99,12 +99,18 @@ impl WorkspaceStoreGuard<'_> {
 pub struct SelectorParams {
     /// Stable ID, slug, or canonical path.
     pub selector: String,
+    /// Shape of canonical node objects in the response.
+    #[serde(default)]
+    pub projection: ResponseProjection,
 }
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct BatchNodeParams {
     /// One to 100 selectors; order and duplicates are preserved.
     pub selectors: Vec<String>,
+    /// Shape of canonical node objects in the response.
+    #[serde(default)]
+    pub projection: ResponseProjection,
 }
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
@@ -119,6 +125,9 @@ pub struct BatchChildrenRequestParams {
 pub struct BatchChildrenParams {
     /// One to 20 grouped parent page requests; aggregate limits may not exceed 100.
     pub requests: Vec<BatchChildrenRequestParams>,
+    /// Shape of canonical node objects in every returned child page.
+    #[serde(default)]
+    pub projection: ResponseProjection,
 }
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
@@ -217,6 +226,9 @@ pub struct PaginationParams {
 pub struct PaginatedSelectorParams {
     /// Stable ID, slug, or canonical path.
     pub selector: String,
+    /// Shape of canonical node objects in the response.
+    #[serde(default)]
+    pub projection: ResponseProjection,
     /// Shared bounded-page and opaque-continuation fields.
     #[serde(flatten)]
     pub pagination: PaginationParams,
@@ -243,6 +255,9 @@ impl From<TraversalOrder> for mdtree_core::TraversalOrder {
 pub struct TraversalParams {
     /// Stable ID, slug, or canonical path.
     pub selector: String,
+    /// Shape of canonical node objects in the response.
+    #[serde(default)]
+    pub projection: ResponseProjection,
     /// Database-side traversal order.
     #[serde(default)]
     pub order: TraversalOrder,
@@ -320,6 +335,24 @@ pub struct ChildAtParams {
     pub parent: String,
     /// Zero-based canonical child position.
     pub index: u32,
+    /// Shape of the returned canonical child node.
+    #[serde(default)]
+    pub projection: ResponseProjection,
+}
+
+/// Named canonical-node response shapes for context-efficient reads.
+#[derive(Clone, Copy, Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseProjection {
+    /// Complete canonical node state (backward-compatible default).
+    #[default]
+    Full,
+    /// Stable identity, title, slug, and parent.
+    Identity,
+    /// Stable identity plus optimistic-concurrency fields.
+    Concurrency,
+    /// Queue membership, title, order, and version without Markdown content.
+    Queue,
 }
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
@@ -743,7 +776,10 @@ impl MdtreeServer {
         Parameters(p): Parameters<SelectorParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let store = self.store()?;
-        json_result(vec![Self::projection_in(&store, &p.selector)?])
+        projected_json_result(
+            vec![Self::projection_in(&store, &p.selector)?],
+            p.projection,
+        )
     }
 
     #[tool(description = "Resolve one to 100 selectors with ordered per-item results and errors")]
@@ -752,7 +788,10 @@ impl MdtreeServer {
         Parameters(p): Parameters<BatchNodeParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let store = self.store()?;
-        json_result(store.batch_node_lookup(&p.selectors).map_err(store_error)?)
+        projected_json_result(
+            store.batch_node_lookup(&p.selectors).map_err(store_error)?,
+            p.projection,
+        )
     }
 
     #[tool(
@@ -772,10 +811,11 @@ impl MdtreeServer {
             })
             .collect::<Vec<_>>();
         let store = self.store()?;
-        json_result(
+        projected_json_result(
             store
                 .batch_children_lookup(&requests)
                 .map_err(store_error)?,
+            p.projection,
         )
     }
 
@@ -867,7 +907,10 @@ impl MdtreeServer {
     ) -> Result<CallToolResult, ErrorData> {
         let store = self.store()?;
         let parent = Self::id_in(&store, &p.parent)?;
-        json_result(store.child_at(parent, p.index).map_err(store_error)?)
+        projected_json_result(
+            store.child_at(parent, p.index).map_err(store_error)?,
+            p.projection,
+        )
     }
 
     #[tool(description = "Return direct previous and next canonical siblings")]
@@ -888,7 +931,7 @@ impl MdtreeServer {
     ) -> Result<CallToolResult, ErrorData> {
         let (store, id) = self.store_and_id(&p.selector)?;
         let (limit, cursor) = p.pagination.validated().map_err(pagination_error)?;
-        byte_bounded_page_result(limit, |candidate| {
+        projected_byte_bounded_page_result(limit, p.projection, |candidate| {
             store
                 .children_page(id, candidate, cursor.as_ref())
                 .map_err(page_read_error)
@@ -902,7 +945,7 @@ impl MdtreeServer {
     ) -> Result<CallToolResult, ErrorData> {
         let (store, id) = self.store_and_id(&p.selector)?;
         let parent = store.parent_projection(id).map_err(store_error)?;
-        json_result(parent.into_iter().collect::<Vec<_>>())
+        projected_json_result(parent.into_iter().collect::<Vec<_>>(), p.projection)
     }
 
     #[tool(description = "Return root-to-parent ancestors")]
@@ -911,10 +954,10 @@ impl MdtreeServer {
         Parameters(p): Parameters<SelectorParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let (store, id) = self.store_and_id(&p.selector)?;
-        json_result(depth_nodes(
-            &store,
-            store.ancestors(id).map_err(store_error)?,
-        ))
+        projected_json_result(
+            depth_nodes(&store, store.ancestors(id).map_err(store_error)?),
+            p.projection,
+        )
     }
 
     #[tool(description = "Return a resumable DFS or BFS page of descendants with relative depth")]
@@ -924,7 +967,7 @@ impl MdtreeServer {
     ) -> Result<CallToolResult, ErrorData> {
         let (store, id) = self.store_and_id(&p.selector)?;
         let (limit, cursor) = p.pagination.validated().map_err(pagination_error)?;
-        byte_bounded_page_result(limit, |candidate| {
+        projected_byte_bounded_page_result(limit, p.projection, |candidate| {
             store
                 .descendants_page_ordered(id, p.order.into(), candidate, cursor.as_ref())
                 .map_err(page_read_error)
@@ -938,7 +981,7 @@ impl MdtreeServer {
     ) -> Result<CallToolResult, ErrorData> {
         let (store, id) = self.store_and_id(&p.selector)?;
         let (limit, cursor) = p.pagination.validated().map_err(pagination_error)?;
-        byte_bounded_page_result(limit, |candidate| {
+        projected_byte_bounded_page_result(limit, p.projection, |candidate| {
             store
                 .siblings_page(id, candidate, cursor.as_ref())
                 .map_err(page_read_error)
@@ -954,7 +997,7 @@ impl MdtreeServer {
     ) -> Result<CallToolResult, ErrorData> {
         let (store, id) = self.store_and_id(&p.selector)?;
         let (limit, cursor) = p.pagination.validated().map_err(pagination_error)?;
-        byte_bounded_page_result(limit, |candidate| {
+        projected_byte_bounded_page_result(limit, p.projection, |candidate| {
             store
                 .subtree_page_ordered(id, p.order.into(), candidate, cursor.as_ref())
                 .map_err(page_read_error)
@@ -1450,6 +1493,86 @@ fn json_result(value: impl Serialize) -> Result<CallToolResult, ErrorData> {
     json_value_result(value)
 }
 
+fn projected_json_result(
+    value: impl Serialize,
+    projection: ResponseProjection,
+) -> Result<CallToolResult, ErrorData> {
+    let mut value = serde_json::to_value(value).map_err(json_error)?;
+    project_node_values(&mut value, projection);
+    json_value_result(value)
+}
+
+fn project_node_values(value: &mut serde_json::Value, projection: ResponseProjection) {
+    if matches!(projection, ResponseProjection::Full) {
+        return;
+    }
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                project_node_values(item, projection);
+            }
+        }
+        serde_json::Value::Object(object)
+            if object.contains_key("id")
+                && object.contains_key("markdown_content")
+                && object.contains_key("version") =>
+        {
+            let id = object.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            let parent_id = object
+                .get("parent_id")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let title = object
+                .get("metadata")
+                .and_then(|metadata| metadata.get("title"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let slug = object
+                .get("slug")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let version = object
+                .get("version")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let content_hash = object
+                .get("content_hash")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let sibling_order = object
+                .get("sibling_order")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            object.clear();
+            object.insert("id".into(), id);
+            match projection {
+                ResponseProjection::Full => {}
+                ResponseProjection::Identity => {
+                    object.insert("title".into(), title);
+                    object.insert("slug".into(), slug);
+                    object.insert("parent_id".into(), parent_id);
+                }
+                ResponseProjection::Concurrency => {
+                    object.insert("version".into(), version);
+                    object.insert("content_hash".into(), content_hash);
+                }
+                ResponseProjection::Queue => {
+                    object.insert("title".into(), title);
+                    object.insert("parent_id".into(), parent_id);
+                    object.insert("sibling_order".into(), sibling_order);
+                    object.insert("version".into(), version);
+                }
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for nested in object.values_mut() {
+                project_node_values(nested, projection);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn byte_bounded_page_result<T, F>(
     requested: PageLimit,
     mut load: F,
@@ -1467,6 +1590,29 @@ where
     }
     Err(ErrorData::invalid_params(
         "single page item exceeds 1048576-byte response limit",
+        Some(serde_json::json!({"code":"item_too_large","max_bytes":MAX_BYTES})),
+    ))
+}
+
+fn projected_byte_bounded_page_result<T, F>(
+    requested: PageLimit,
+    projection: ResponseProjection,
+    mut load: F,
+) -> Result<CallToolResult, ErrorData>
+where
+    T: Serialize,
+    F: FnMut(PageLimit) -> Result<T, ErrorData>,
+{
+    for item_count in (1..=requested.get()).rev() {
+        let candidate = PageLimit::new(item_count).map_err(pagination_error)?;
+        let mut value = serde_json::to_value(load(candidate)?).map_err(json_error)?;
+        project_node_values(&mut value, projection);
+        if serde_json::to_vec(&value).map_err(json_error)?.len() <= MAX_BYTES {
+            return json_value_result(value);
+        }
+    }
+    Err(ErrorData::invalid_params(
+        "single projected page item exceeds 1048576-byte response limit",
         Some(serde_json::json!({"code":"item_too_large","max_bytes":MAX_BYTES})),
     ))
 }
@@ -1530,8 +1676,50 @@ mod tests {
 
     use super::{
         complete_workspace_resource, snapshot_nodes, CompleteResource, McpAccessMode, MdtreeServer,
-        PaginationParams,
+        PaginationParams, ResponseProjection,
     };
+
+    #[test]
+    fn named_response_projections_remove_markdown_and_keep_required_fields() {
+        let node = serde_json::json!({
+            "id":"node-1",
+            "parent_id":"queue-1",
+            "slug":"task-one",
+            "metadata":{"title":"Task One","tags":["large"]},
+            "markdown_content":"a very large task body",
+            "sibling_order":2,
+            "version":7,
+            "content_hash":"abc",
+            "revision_hash":"def",
+            "created_at":1,
+            "updated_at":2
+        });
+        let cases = [
+            (
+                ResponseProjection::Identity,
+                serde_json::json!({
+                    "id":"node-1","title":"Task One","slug":"task-one","parent_id":"queue-1"
+                }),
+            ),
+            (
+                ResponseProjection::Concurrency,
+                serde_json::json!({"id":"node-1","version":7,"content_hash":"abc"}),
+            ),
+            (
+                ResponseProjection::Queue,
+                serde_json::json!({
+                    "id":"node-1","title":"Task One","parent_id":"queue-1",
+                    "sibling_order":2,"version":7
+                }),
+            ),
+        ];
+        for (projection, expected) in cases {
+            let mut projected = serde_json::json!({"items":[node.clone()]});
+            super::project_node_values(&mut projected, projection);
+            assert_eq!(projected["items"][0], expected);
+            assert!(projected.to_string().len() < node.to_string().len());
+        }
+    }
 
     fn server() -> (tempfile::TempDir, MdtreeServer) {
         let directory = tempdir().expect("tempdir");
