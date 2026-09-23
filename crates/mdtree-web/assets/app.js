@@ -2872,15 +2872,20 @@ function summaryForNode(id) {
 // inserts a `![]()` placeholder, which needs no backend) and no "guide"
 // button (it link out to an external Markdown syntax reference, at odds
 // with this app's otherwise fully offline, self-contained operation).
+// "highlight" is this app's own button for the `==text==` extension (see
+// with_highlights in crates/mdtree-web/src/markdown.rs), which EasyMDE has
+// no built-in action for.
 const EDITOR_TOOLBAR = [
-  "bold", "italic", "heading", "|",
+  "bold", "italic",
+  { name: "highlight", action: toggleHighlight, className: "fa fa-highlighter", title: "Highlight (Ctrl-Shift-H)" },
+  "heading", "|",
   "quote", "unordered-list", "ordered-list", "|",
   "link", "image", "code", "|",
   "preview", "side-by-side", "fullscreen",
 ];
 
 function createMarkdownEditor(textarea, initialValue) {
-  return new EasyMDE({
+  const editor = new EasyMDE({
     element: textarea,
     initialValue,
     autofocus: true,
@@ -2888,7 +2893,97 @@ function createMarkdownEditor(textarea, initialValue) {
     status: false,
     toolbar: EDITOR_TOOLBAR,
     minHeight: "0",
+    // EasyMDE's bundled `marked` doesn't know `==text==`, so its preview
+    // gets the same highlight pass the server applies to the viewer.
+    previewRender(plainText) {
+      return highlightMarks(this.parent.markdown(plainText));
+    },
   });
+  editor.codemirror.addKeyMap({
+    "Shift-Ctrl-H": () => toggleHighlight(editor),
+    "Shift-Cmd-H": () => toggleHighlight(editor),
+  });
+  return editor;
+}
+
+// Wraps the selection in `==` (with nothing selected, inserts an empty
+// `====` pair with the cursor between), or unwraps it if it's already
+// wrapped — whether the `==` are inside the selection or immediately around it.
+function toggleHighlight(editor) {
+  const cm = editor.codemirror;
+  const from = cm.getCursor("from");
+  const to = cm.getCursor("to");
+  const selected = cm.getSelection();
+  const before = cm.getRange({ line: from.line, ch: from.ch - 2 }, from);
+  const after = cm.getRange(to, { line: to.line, ch: to.ch + 2 });
+  if (before === "==" && after === "==") {
+    cm.replaceRange("", to, { line: to.line, ch: to.ch + 2 });
+    cm.replaceRange("", { line: from.line, ch: from.ch - 2 }, from);
+    const shift = to.line === from.line ? 2 : 0;
+    cm.setSelection({ line: from.line, ch: from.ch - 2 }, { line: to.line, ch: to.ch - shift });
+  } else if (selected.length >= 4 && selected.startsWith("==") && selected.endsWith("==")) {
+    cm.replaceSelection(selected.slice(2, -2), "around");
+  } else {
+    cm.replaceSelection(`==${selected}==`);
+    const end = cm.getCursor("to");
+    cm.setSelection({ line: from.line, ch: from.ch + 2 }, { line: end.line, ch: end.ch - 2 });
+  }
+  cm.focus();
+}
+
+// Client-side twin of highlight_spans in crates/mdtree-web/src/markdown.rs —
+// same delimiter rule, applied per text node (so, like the server, a span
+// never crosses other inline markup) and never inside code.
+const HIGHLIGHT_DELIMITER = /(?<!=)==(?!=)/g;
+
+function highlightSpans(text) {
+  const spans = [];
+  let open = null;
+  for (const match of text.matchAll(HIGHLIGHT_DELIMITER)) {
+    const at = match.index;
+    const nextIsText = at + 2 < text.length && !/\s/.test(text[at + 2]);
+    const prevIsText = at > 0 && !/\s/.test(text[at - 1]);
+    if (open !== null) {
+      if (prevIsText && at > open + 2) {
+        spans.push([open, at]);
+        open = null;
+      }
+    } else if (nextIsText) {
+      open = at;
+    }
+  }
+  return spans;
+}
+
+function highlightMarks(html) {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  while (walker.nextNode()) {
+    if (!walker.currentNode.parentElement?.closest("code, pre")) {
+      textNodes.push(walker.currentNode);
+    }
+  }
+  for (const node of textNodes) {
+    const text = node.data;
+    const spans = highlightSpans(text);
+    if (spans.length === 0) {
+      continue;
+    }
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+    for (const [open, close] of spans) {
+      fragment.append(text.slice(cursor, open));
+      const mark = document.createElement("mark");
+      mark.textContent = text.slice(open + 2, close);
+      fragment.append(mark);
+      cursor = close + 2;
+    }
+    fragment.append(text.slice(cursor));
+    node.replaceWith(fragment);
+  }
+  return template.innerHTML;
 }
 
 // ---------------------------------------------------------------------------

@@ -370,6 +370,15 @@
     font-style: italic;
   }
 
+  .editor-toolbar .fa-highlighter::before {
+    content: "ab";
+    font-size: 0.8em;
+    padding: 0 0.15em;
+    border-radius: 0.15em;
+    background-color: var(--color-yellow-200);
+    color: var(--color-slate-900);
+  }
+
   .editor-toolbar .fa-header::before {
     content: "H";
     font-weight: 700;
@@ -411,6 +420,12 @@
 
   .editor-toolbar .fa-arrows-alt::before {
     content: "⛶";
+  }
+
+  /* `==text==` highlights (see with_highlights in src/markdown.rs), in both
+     the viewer and the editor preview. */
+  mark {
+    @apply rounded-sm bg-yellow-200 px-0.5 text-slate-900 dark:bg-yellow-400/30 dark:text-yellow-100;
   }
 
   .dark .editor-toolbar {
