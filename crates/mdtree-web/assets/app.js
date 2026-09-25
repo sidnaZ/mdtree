@@ -140,6 +140,9 @@ function createWorkspaceState() {
     // actions" menu's Delete, after the user confirms) and cleared on its
     // ack or reject.
     pendingDelete: null,
+    // Set once a `rename_node` command has been sent from the Rename dialog
+    // and cleared on its ack or reject.
+    pendingRename: null,
     // True while a staged expand-all traversal (Alt+E, Shift+E, or the
     // Expand menu) is in flight, so the status bar can surface that it is
     // running and cancellable.
@@ -2205,6 +2208,8 @@ async function handleCommandResponse(envelope) {
     await handleCreateNodeResponse(envelope);
   } else if (state.pendingDelete && command === "remove_node") {
     await handleRemoveNodeResponse(envelope);
+  } else if (state.pendingRename && command === "rename_node") {
+    await handleRenameNodeResponse(envelope);
   }
 }
 
@@ -2303,9 +2308,9 @@ function showNodeCardMenu(trigger, nodeId) {
   deleteItem.hidden = nodeId === state.root;
   const rect = trigger.getBoundingClientRect();
   // A row of icon-rail-button chips (see index.html), not the wider
-  // text-label list this used to be — narrow enough that even three of
+  // text-label list this used to be — narrow enough that even four of
   // them plus padding/gaps comfortably fits the smaller assumed width.
-  const assumedMenuWidth = 140;
+  const assumedMenuWidth = 180;
   const overflowsRight = rect.right + 8 + assumedMenuWidth > window.innerWidth;
   menu.style.left = `${Math.max(8, overflowsRight ? rect.left - assumedMenuWidth - 8 : rect.right + 8)}px`;
   menu.style.top = `${rect.top}px`;
@@ -3966,6 +3971,110 @@ async function handleRemoveNodeResponse(envelope) {
   }
 }
 
+// Id of the node the `#rename-dialog-overlay` dialog is renaming — same
+// single-shared-dialog pattern as `deleteConfirmTargetId`.
+let renameDialogTargetId = null;
+
+// Opens the Rename dialog prefilled with the node's current title. Renaming
+// is its own command (`rename_node`, same as the CLI `rename` and the MCP
+// `rename_node` tool), separate from the editor's content/metadata Save.
+function requestRenameNode(id) {
+  if (state.pendingRename) {
+    return;
+  }
+  const summary = summaryForNode(id);
+  if (!summary || summary.version === undefined) {
+    return;
+  }
+  renameDialogTargetId = id;
+  const titleInput = document.getElementById("rename-dialog-title");
+  titleInput.value = summary.title;
+  document.getElementById("rename-dialog-regenerate-slug").checked = false;
+  document.getElementById("rename-dialog-slug-hint").textContent = summary.slug
+    ? `Unchecked keeps the current slug "${summary.slug}" and path.`
+    : "";
+  showRenameError("");
+  document.getElementById("rename-dialog-confirm").disabled = false;
+  document.getElementById("rename-dialog-overlay").hidden = false;
+  titleInput.focus();
+  titleInput.select();
+}
+
+function hideRenameDialog() {
+  document.getElementById("rename-dialog-overlay").hidden = true;
+  renameDialogTargetId = null;
+}
+
+function showRenameError(message) {
+  const error = document.getElementById("rename-dialog-error");
+  error.textContent = message;
+  error.hidden = !message;
+}
+
+// Unlike Delete, the dialog stays open until the server answers, so a
+// rejection (blank title, version conflict) can be shown right in it.
+function confirmRenameNode() {
+  const id = renameDialogTargetId;
+  if (!id || state.pendingRename) {
+    return;
+  }
+  const summary = summaryForNode(id);
+  if (!summary || summary.version === undefined) {
+    return;
+  }
+  const title = document.getElementById("rename-dialog-title").value.trim();
+  if (!title) {
+    showRenameError("Title is required.");
+    return;
+  }
+  const regenerateSlug = document.getElementById("rename-dialog-regenerate-slug").checked;
+  if (title === summary.title && !regenerateSlug) {
+    hideRenameDialog();
+    return;
+  }
+  showRenameError("");
+  state.pendingRename = { id };
+  document.getElementById("rename-dialog-confirm").disabled = true;
+  const sent = sendCommand("rename_node", {
+    selector: id,
+    title,
+    slug_policy: regenerateSlug ? "regenerate" : "preserve",
+    expected_version: summary.version,
+  });
+  if (!sent) {
+    state.pendingRename = null;
+    document.getElementById("rename-dialog-confirm").disabled = false;
+    showRenameError("Not connected to the server — try again once reconnected.");
+  }
+}
+
+async function handleRenameNodeResponse(envelope) {
+  const pending = state.pendingRename;
+  state.pendingRename = null;
+  document.getElementById("rename-dialog-confirm").disabled = false;
+  if (envelope.type !== "ack") {
+    if (renameDialogTargetId === pending.id) {
+      showRenameError(envelope.payload?.reason ?? "Rename failed.");
+    } else {
+      reportError(new Error(envelope.payload?.reason ?? "Rename failed."));
+    }
+    return;
+  }
+  if (renameDialogTargetId === pending.id) {
+    hideRenameDialog();
+  }
+  noteSelfCausedChange();
+  state.stale.delete(pending.id);
+  // Reloading the node also patches its entry in the parent's cached
+  // children (syncSummaryInParent), so the tree card shows the new title.
+  await loadNode(activeWorkspaceId, pending.id);
+  if (state.viewerNodeId === pending.id) {
+    document.getElementById("reading-pane-title").textContent =
+      summaryForNode(pending.id)?.title ?? "";
+  }
+  render();
+}
+
 // Registers that our own just-acked create/update/reorder/move already
 // applied its own precise `state.stale` adjustment above — so the "change"
 // broadcast that same mutation triggers (always arriving after this ack,
@@ -4332,6 +4441,8 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     if (!document.getElementById("delete-confirm-overlay").hidden) {
       hideDeleteConfirm();
+    } else if (!document.getElementById("rename-dialog-overlay").hidden) {
+      hideRenameDialog();
     } else if (!document.getElementById("node-card-menu").hidden) {
       hideNodeCardMenu();
     } else if (openRootCurrentMenus.some(({ menu }) => !menu.hidden)) {
@@ -4526,6 +4637,14 @@ document.getElementById("node-card-menu-add-child").addEventListener("click", ()
   }
 });
 
+document.getElementById("node-card-menu-rename").addEventListener("click", () => {
+  const id = nodeCardMenuTargetId;
+  hideNodeCardMenu();
+  if (id) {
+    requestRenameNode(id);
+  }
+});
+
 document.getElementById("node-card-menu-delete").addEventListener("click", () => {
   const id = nodeCardMenuTargetId;
   hideNodeCardMenu();
@@ -4534,7 +4653,7 @@ document.getElementById("node-card-menu-delete").addEventListener("click", () =>
   }
 });
 
-// This menu's three actions are icon-only (see index.html, matching the
+// This menu's four actions are icon-only (see index.html, matching the
 // Fit/Expand/Collapse menus' own look), so each needs the shared hover
 // tooltip wired by hand instead of relying on visible text.
 document.getElementById("node-card-menu-focus").addEventListener("pointerenter", (event) => {
@@ -4545,10 +4664,43 @@ document.getElementById("node-card-menu-add-child").addEventListener("pointerent
   showTooltip(event.currentTarget, "Add child node", "above");
 });
 document.getElementById("node-card-menu-add-child").addEventListener("pointerleave", hideTooltip);
+document.getElementById("node-card-menu-rename").addEventListener("pointerenter", (event) => {
+  showTooltip(event.currentTarget, "Rename node", "above");
+});
+document.getElementById("node-card-menu-rename").addEventListener("pointerleave", hideTooltip);
 document.getElementById("node-card-menu-delete").addEventListener("pointerenter", (event) => {
   showTooltip(event.currentTarget, "Delete node", "above");
 });
 document.getElementById("node-card-menu-delete").addEventListener("pointerleave", hideTooltip);
+
+document.getElementById("rename-dialog-cancel").addEventListener("click", () => {
+  hideRenameDialog();
+});
+document.getElementById("rename-dialog-confirm").addEventListener("click", () => {
+  confirmRenameNode();
+});
+// The global keydown handler ignores keys typed into inputs, so the title
+// field handles its own Enter (confirm) and Escape (cancel).
+document.getElementById("rename-dialog-title").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    confirmRenameNode();
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    hideRenameDialog();
+  }
+});
+document.getElementById("rename-dialog-overlay").addEventListener("mousedown", (event) => {
+  if (event.target === event.currentTarget) {
+    event.currentTarget.dataset.backdropArmed = "1";
+  }
+});
+document.getElementById("rename-dialog-overlay").addEventListener("click", (event) => {
+  if (event.target === event.currentTarget && event.currentTarget.dataset.backdropArmed === "1") {
+    hideRenameDialog();
+  }
+  delete event.currentTarget.dataset.backdropArmed;
+});
 
 document.getElementById("delete-confirm-cancel").addEventListener("click", () => {
   hideDeleteConfirm();

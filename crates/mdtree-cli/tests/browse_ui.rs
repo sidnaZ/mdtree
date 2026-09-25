@@ -1692,6 +1692,145 @@ async fn browse_ui_websocket_update_node_command_applies_and_rejects_stale_versi
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
+async fn browse_ui_websocket_rename_node_command_preserves_the_slug_by_default() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let directory = tempdir().expect("tempdir");
+    let init = mdtree()
+        .current_dir(directory.path())
+        .args(["init", "Rename Node Test"])
+        .output()
+        .expect("run init");
+    assert!(init.status.success());
+    let create = mdtree()
+        .current_dir(directory.path())
+        .args([
+            "create",
+            "rename-node-test",
+            "Doc",
+            "--content",
+            "# Doc\n\nbody",
+        ])
+        .output()
+        .expect("run create");
+    assert!(create.status.success());
+
+    let mut child = mdtree()
+        .current_dir(directory.path())
+        .args(["__serve-ui"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn browse-ui");
+    let mut reader = BufReader::new(child.stdout.take().expect("captured stdout"));
+    let url = read_listening_url(&mut reader);
+    let address = url.strip_prefix("http://").expect("loopback URL");
+
+    let (_, body) = http_get(address, "/api/workspaces", None);
+    let session: serde_json::Value = serde_json::from_str(&body).expect("session JSON");
+    let root_id = session["workspaces"][0]["root"]
+        .as_str()
+        .expect("root id")
+        .to_string();
+    let (_, body) = http_get(address, &format!("/api/0/node/{root_id}"), None);
+    let root_node: serde_json::Value = serde_json::from_str(&body).expect("node JSON");
+    let doc_id = root_node["children"][0]["id"]
+        .as_str()
+        .expect("doc id")
+        .to_string();
+    let credential = session_credential(address);
+
+    let mut request = format!("ws://{address}/api/ws/0?session={credential}")
+        .into_client_request()
+        .expect("valid websocket request");
+    request
+        .headers_mut()
+        .insert("Origin", url.parse().expect("origin header value"));
+    let (mut socket, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("websocket handshake");
+    socket
+        .next()
+        .await
+        .expect("init message")
+        .expect("no websocket error");
+
+    let mut send = async |payload: serde_json::Value| -> serde_json::Value {
+        let envelope = serde_json::json!({
+            "v": 1, "id": "t", "session": "test", "type": "command", "payload": payload,
+        });
+        socket
+            .send(WsMessage::Text(envelope.to_string().into()))
+            .await
+            .expect("send command");
+        let WsMessage::Text(text) = socket
+            .next()
+            .await
+            .expect("response")
+            .expect("no websocket error")
+        else {
+            panic!("expected a text frame");
+        };
+        serde_json::from_str(&text).expect("envelope JSON")
+    };
+    let node = |address: &str| -> serde_json::Value {
+        let (_, body) = http_get(address, &format!("/api/0/node/{doc_id}"), None);
+        serde_json::from_str(&body).expect("node JSON")
+    };
+
+    // Default policy: new title, same slug, content untouched.
+    let response = send(serde_json::json!({
+        "command": "rename_node", "selector": doc_id, "title": "Doc Renamed",
+        "expected_version": 1,
+    }))
+    .await;
+    assert_eq!(response["type"], "ack");
+    assert_eq!(response["payload"]["command"], "rename_node");
+    assert_eq!(response["revision"], 2);
+    let renamed = node(address);
+    assert_eq!(renamed["title"], "Doc Renamed");
+    assert_eq!(renamed["slug"], "doc");
+    let (_, body) = http_get(address, &format!("/api/0/node/{doc_id}/source"), None);
+    let source: serde_json::Value = serde_json::from_str(&body).expect("source JSON");
+    assert_eq!(source["markdown_content"], "# Doc\n\nbody");
+
+    // A stale version is rejected without applying anything.
+    let response = send(serde_json::json!({
+        "command": "rename_node", "selector": doc_id, "title": "Stale",
+        "expected_version": 1,
+    }))
+    .await;
+    assert_eq!(response["type"], "reject");
+    assert_eq!(node(address)["title"], "Doc Renamed");
+
+    // Explicit regenerate derives the slug from the new title.
+    let response = send(serde_json::json!({
+        "command": "rename_node", "selector": doc_id, "title": "Fresh Name",
+        "slug_policy": "regenerate", "expected_version": 2,
+    }))
+    .await;
+    assert_eq!(response["type"], "ack");
+    let renamed = node(address);
+    assert_eq!(renamed["title"], "Fresh Name");
+    assert_eq!(renamed["slug"], "fresh-name");
+
+    // update_node still never changes the title (renaming is rename_node's job).
+    let response = send(serde_json::json!({
+        "command": "update_node", "selector": doc_id, "content": "# Doc\n\nbody",
+        "metadata": {"title": "Sneaky"}, "expected_version": 3,
+    }))
+    .await;
+    assert_eq!(response["type"], "ack");
+    assert_eq!(node(address)["title"], "Fresh Name");
+
+    child.kill().expect("terminate the session process");
+    child.wait().expect("wait for process exit");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn browse_ui_websocket_create_node_command_creates_a_child_and_returns_its_id() {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;

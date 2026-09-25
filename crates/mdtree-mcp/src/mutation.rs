@@ -120,6 +120,15 @@ pub enum McpRenameSlugPolicy {
     Regenerate,
 }
 
+impl From<McpRenameSlugPolicy> for RenameSlugPolicy {
+    fn from(value: McpRenameSlugPolicy) -> Self {
+        match value {
+            McpRenameSlugPolicy::Preserve => Self::Preserve,
+            McpRenameSlugPolicy::Regenerate => Self::Regenerate,
+        }
+    }
+}
+
 /// Input for atomically renaming a node.
 #[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 pub struct RenameNodeParams {
@@ -236,6 +245,9 @@ pub enum MutationBatchOperationParams {
     Rename {
         selector: String,
         title: String,
+        /// Same meaning and default as `rename_node`'s `slug_policy`.
+        #[serde(default)]
+        slug_policy: McpRenameSlugPolicy,
         precondition: WritePrecondition,
     },
     Move {
@@ -1143,23 +1155,9 @@ impl MdtreeServer {
             fields.content_hash.as_bytes(),
             &params.precondition,
         )?;
-        let sibling_slugs = if let Some(parent) = current.parent_id() {
-            store
-                .children(parent)
-                .map_err(crate::store_error)?
-                .into_iter()
-                .filter(|node| node.id() != id)
-                .map(|node| node.fields().slug.clone())
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let policy = match params.slug_policy {
-            McpRenameSlugPolicy::Preserve => RenameSlugPolicy::Preserve,
-            McpRenameSlugPolicy::Regenerate => RenameSlugPolicy::Regenerate,
-        };
-        let slug =
-            mdtree_core::slug_for_rename(&fields.slug, &params.title, &sibling_slugs, policy);
+        let slug = store
+            .slug_for_rename(&current, &params.title, params.slug_policy.into())
+            .map_err(crate::store_error)?;
         let base_slug = mdtree_core::generate_slug(&params.title, std::iter::empty());
         let warnings =
             if matches!(params.slug_policy, McpRenameSlugPolicy::Regenerate) && slug != base_slug {
@@ -1951,20 +1949,16 @@ fn prepare_mcp_batch(
             MutationBatchOperationParams::Rename {
                 selector,
                 title,
+                slug_policy,
                 precondition,
             } => {
                 let current = mcp_batch_current(store, &labels, selector, precondition)?;
                 let f = current.fields();
                 let mut metadata = f.metadata.clone();
                 metadata.title.clone_from(title);
-                let slug = if let Some(parent) = current.parent_id() {
-                    store
-                        .next_child_placement(parent, title)
-                        .map_err(crate::store_error)?
-                        .0
-                } else {
-                    generate_slug(title, std::iter::empty::<&Slug>())
-                };
+                let slug = store
+                    .slug_for_rename(&current, title, (*slug_policy).into())
+                    .map_err(crate::store_error)?;
                 result.push(PreparedBatchOperation::Replace {
                     prepared: prepare_node_mutation(
                         NodeMutationDraft {

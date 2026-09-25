@@ -71,6 +71,26 @@ impl From<SearchModeArg> for mdtree_core::SearchMode {
     }
 }
 
+/// Slug behavior for `rename`, matching the MCP `rename_node` tool.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum RenameSlugArg {
+    /// Keep the current slug, so the node's canonical path does not change.
+    #[default]
+    Preserve,
+    /// Generate a new sibling-unique slug from the new title.
+    Regenerate,
+}
+
+impl From<RenameSlugArg> for mdtree_core::RenameSlugPolicy {
+    fn from(value: RenameSlugArg) -> Self {
+        match value {
+            RenameSlugArg::Preserve => Self::Preserve,
+            RenameSlugArg::Regenerate => Self::Regenerate,
+        }
+    }
+}
+
 /// Structural relation selected by `navigate`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum NavigationRelation {
@@ -550,12 +570,16 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Rename a node and regenerate its collision-safe slug.
+    /// Rename a node, keeping its slug unless `--slug regenerate` is given.
     Rename {
         /// Node selector.
         selector: String,
         /// Replacement title.
         title: String,
+        /// Whether the slug (and so the canonical path) is kept or
+        /// regenerated from the new title.
+        #[arg(long, value_enum, default_value_t)]
+        slug: RenameSlugArg,
         /// Version observed by the caller.
         #[arg(long)]
         expected_version: u64,
@@ -776,6 +800,8 @@ enum CliBatchOperation {
     Rename {
         selector: String,
         title: String,
+        #[serde(default)]
+        slug_policy: RenameSlugArg,
         expected_version: u64,
     },
     Move {
@@ -1522,6 +1548,7 @@ pub fn execute(cli: &Cli, output: &mut dyn Write) -> anyhow::Result<u8> {
         Command::Rename {
             selector,
             title,
+            slug,
             expected_version,
             dry_run,
         } => {
@@ -1529,11 +1556,7 @@ pub fn execute(cli: &Cli, output: &mut dyn Write) -> anyhow::Result<u8> {
             let f = current.fields();
             let mut metadata = f.metadata.clone();
             metadata.title.clone_from(title);
-            let slug = if let Some(parent) = current.parent_id() {
-                store.next_child_placement(parent, title)?.0
-            } else {
-                mdtree_core::generate_slug(title, std::iter::empty::<&Slug>())
-            };
+            let slug = store.slug_for_rename(&current, title, (*slug).into())?;
             let prepared = prepare_cli_mutation(
                 current.id(),
                 current.parent_id(),
@@ -2513,20 +2536,14 @@ fn prepare_cli_batch(
             CliBatchOperation::Rename {
                 selector,
                 title,
+                slug_policy,
                 expected_version,
             } => {
                 let current = batch_current_node(store, &labels, &selector)?;
                 let f = current.fields();
                 let mut metadata = f.metadata.clone();
                 metadata.title.clone_from(&title);
-                let slug = current.parent_id().map_or_else(
-                    || mdtree_core::generate_slug(&title, std::iter::empty::<&Slug>()),
-                    |parent| {
-                        store
-                            .next_child_placement(parent, &title)
-                            .map_or_else(|_| f.slug.clone(), |value| value.0)
-                    },
-                );
+                let slug = store.slug_for_rename(&current, &title, slug_policy.into())?;
                 operations.push(PreparedBatchOperation::Replace {
                     prepared: prepare_cli_mutation(
                         current.id(),

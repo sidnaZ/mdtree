@@ -13,8 +13,8 @@ use mdtree_core::{
     generate_slug, hash_content, hash_revision, Breadcrumb, CloneSubtreeRequest,
     CloneSubtreeResult, CursorScope, Node, NodeFields, NodeHash, NodeId, NodeMetadata,
     NodeRevision, NodeSelector, Page, PageCursor, PageLimit, PagePosition, PaginationError,
-    Reference, ReferenceOrigin, ReferenceTarget, ReferenceType, RevisionHashInput, Slug,
-    UlidGenerator,
+    Reference, ReferenceOrigin, ReferenceTarget, ReferenceType, RenameSlugPolicy,
+    RevisionHashInput, Slug, UlidGenerator,
 };
 use mdtree_markdown::DerivedNodeRecords;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -488,6 +488,32 @@ impl SqliteStore {
             .max()
             .map_or(0, |order| order.saturating_add(1));
         Ok((slug, order))
+    }
+
+    /// Chooses the slug a node gets when renamed to `title` under `policy`.
+    /// A regenerated slug is unique among the node's siblings, never counting
+    /// the node's own current slug as taken — so renaming "Leaf" to "LEAF"
+    /// keeps `leaf` rather than becoming `leaf-2`.
+    pub fn slug_for_rename(
+        &self,
+        node: &Node,
+        title: &str,
+        policy: RenameSlugPolicy,
+    ) -> Result<Slug, StoreError> {
+        let siblings = match node.parent_id() {
+            Some(parent) => self
+                .children(parent)?
+                .into_iter()
+                .filter(|sibling| sibling.id() != node.id())
+                .collect(),
+            None => Vec::new(),
+        };
+        Ok(mdtree_core::slug_for_rename(
+            &node.fields().slug,
+            title,
+            siblings.iter().map(|sibling| &sibling.fields().slug),
+            policy,
+        ))
     }
 
     /// Lists immutable revisions in ascending version order.

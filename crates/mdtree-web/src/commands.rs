@@ -8,7 +8,9 @@
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mdtree_core::{NodeId, NodeMetadata, NodeSelector, Slug, SystemUlidGenerator, UlidGenerator};
+use mdtree_core::{
+    NodeId, NodeMetadata, NodeSelector, RenameSlugPolicy, Slug, SystemUlidGenerator, UlidGenerator,
+};
 use mdtree_sqlite::{prepare_node_mutation, NodeMutationDraft};
 use serde::Deserialize;
 use serde_json::Value;
@@ -106,6 +108,26 @@ struct UpdateNodePayload {
 }
 
 #[derive(Deserialize)]
+struct RenameNodePayload {
+    selector: String,
+    title: String,
+    /// Same choice, wire names, and default as the MCP `rename_node` tool:
+    /// the slug (and so the canonical path) is kept unless the client asks
+    /// for it to be regenerated from the new title.
+    #[serde(default)]
+    slug_policy: SlugPolicyPayload,
+    expected_version: u64,
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SlugPolicyPayload {
+    #[default]
+    Preserve,
+    Regenerate,
+}
+
+#[derive(Deserialize)]
 struct RemoveNodePayload {
     selector: String,
     expected_version: u64,
@@ -140,6 +162,7 @@ pub(crate) fn handle(text: &str, workspace: &WorkspaceState) -> Option<CommandOu
         "reorder_node" => reorder_node(workspace, envelope.payload),
         "move_subtree" => move_subtree(workspace, envelope.payload),
         "update_node" => update_node(workspace, envelope.payload),
+        "rename_node" => rename_node(workspace, envelope.payload),
         "create_node" => create_node(workspace, envelope.payload),
         "remove_node" => remove_node(workspace, envelope.payload),
         other => CommandOutcome::reject(other.to_string(), "unknown command".into()),
@@ -403,6 +426,79 @@ fn update_node(workspace: &WorkspaceState, payload: Value) -> CommandOutcome {
             CommandOutcome::ack("update_node".into(), expected_version)
         }
         Err(error) => CommandOutcome::reject("update_node".into(), error.to_string()),
+    }
+}
+
+// Mirrors the MCP `rename_node` tool: only the title (and, if asked, the
+// slug) changes; content, the rest of the metadata, parent, and sibling
+// position are carried forward untouched.
+fn rename_node(workspace: &WorkspaceState, payload: Value) -> CommandOutcome {
+    let params: RenameNodePayload = match serde_json::from_value(payload) {
+        Ok(params) => params,
+        Err(error) => return CommandOutcome::reject("rename_node".into(), error.to_string()),
+    };
+    let mut store = workspace
+        .store
+        .lock()
+        .expect("workspace store mutex poisoned");
+
+    let selector = match NodeSelector::from_str(&params.selector) {
+        Ok(selector) => selector,
+        Err(error) => return CommandOutcome::reject("rename_node".into(), error.to_string()),
+    };
+    let current = match store.resolve(&selector) {
+        Ok(Some(node)) => node,
+        Ok(None) => return CommandOutcome::reject("rename_node".into(), "node not found".into()),
+        Err(error) => return CommandOutcome::reject("rename_node".into(), error.to_string()),
+    };
+    let fields = current.fields();
+    if fields.version != params.expected_version {
+        return CommandOutcome::reject(
+            "rename_node".into(),
+            "version conflict: the node changed since the rename began".into(),
+        );
+    }
+
+    let policy = match params.slug_policy {
+        SlugPolicyPayload::Preserve => RenameSlugPolicy::Preserve,
+        SlugPolicyPayload::Regenerate => RenameSlugPolicy::Regenerate,
+    };
+    let slug = match store.slug_for_rename(&current, &params.title, policy) {
+        Ok(slug) => slug,
+        Err(error) => return CommandOutcome::reject("rename_node".into(), error.to_string()),
+    };
+    let mut metadata = fields.metadata.clone();
+    metadata.title.clone_from(&params.title);
+
+    let prepared = match prepare_node_mutation(
+        NodeMutationDraft {
+            id: current.id(),
+            parent_id: current.parent_id(),
+            slug,
+            metadata,
+            markdown_content: fields.markdown_content.clone(),
+            sibling_order: fields.sibling_order,
+            version: fields.version + 1,
+            created_at: fields.created_at,
+            updated_at: now_millis(),
+            created_by: None,
+            change_summary: Some("Rename node via browse-ui".into()),
+        },
+        &SystemUlidGenerator,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => return CommandOutcome::reject("rename_node".into(), error.to_string()),
+    };
+
+    let expected_version = fields.version;
+    match store.rename_node(prepared.change(expected_version)) {
+        Ok(mdtree_sqlite::MutationOutcome::Applied) => {
+            CommandOutcome::ack("rename_node".into(), prepared.node.fields().version)
+        }
+        Ok(mdtree_sqlite::MutationOutcome::NoOp) => {
+            CommandOutcome::ack("rename_node".into(), expected_version)
+        }
+        Err(error) => CommandOutcome::reject("rename_node".into(), error.to_string()),
     }
 }
 

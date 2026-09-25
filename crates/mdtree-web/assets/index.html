@@ -317,6 +317,16 @@
           </svg>
         </button>
         <button
+          id="node-card-menu-rename"
+          type="button"
+          aria-label="Rename node"
+          class="icon-rail-button"
+        >
+          <svg viewBox="0 0 20 20" fill="none" class="h-4 w-4" stroke="currentColor" stroke-width="1.6">
+            <path d="M3 15.5h4M11.5 4.5l3 3L8 14H5v-3l6.5-6.5z" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+        <button
           id="node-card-menu-delete"
           type="button"
           aria-label="Delete node"
@@ -673,6 +683,54 @@
             type="button"
             class="rounded-md bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:pointer-events-none disabled:opacity-60"
           >Delete</button>
+        </div>
+      </div>
+    </div>
+    <div
+      id="rename-dialog-overlay"
+      hidden
+      class="fixed inset-0 z-50 flex items-center justify-center bg-slate-500/30 backdrop-blur-sm dark:bg-slate-950/70"
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="rename-dialog-heading"
+        class="w-full max-w-md overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-400/30 dark:border-slate-800 dark:bg-slate-900 dark:shadow-black/50"
+      >
+        <div class="space-y-4 p-6">
+          <h2 id="rename-dialog-heading" class="text-base font-semibold text-slate-900 dark:text-slate-100">Rename node</h2>
+          <div>
+            <label
+              for="rename-dialog-title"
+              class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500"
+            >Title</label>
+            <input
+              id="rename-dialog-title"
+              type="text"
+              autocomplete="off"
+              class="w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-sm text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:placeholder:text-slate-500"
+            />
+          </div>
+          <label class="flex items-start gap-2 text-sm text-slate-600 dark:text-slate-300">
+            <input id="rename-dialog-regenerate-slug" type="checkbox" class="mt-0.5" />
+            <span>
+              Update slug from new title
+              <span id="rename-dialog-slug-hint" class="block text-xs text-slate-400 dark:text-slate-500"></span>
+            </span>
+          </label>
+          <p id="rename-dialog-error" hidden class="text-xs text-rose-600 dark:text-rose-300"></p>
+        </div>
+        <div class="flex justify-end gap-2 border-t border-slate-200 bg-slate-50 px-6 py-4 dark:border-slate-800 dark:bg-slate-800/40">
+          <button
+            id="rename-dialog-cancel"
+            type="button"
+            class="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+          >Cancel</button>
+          <button
+            id="rename-dialog-confirm"
+            type="button"
+            class="rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:pointer-events-none disabled:opacity-60"
+          >Rename</button>
         </div>
       </div>
     </div>

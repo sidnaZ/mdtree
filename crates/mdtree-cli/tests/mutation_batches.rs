@@ -84,3 +84,88 @@ fn cli_batches_commit_once_and_resolve_temporary_create_labels() {
     let child = run_json(&workspace, &["show", "new-child"]);
     assert_eq!(child[0]["metadata"]["title"], "New Child");
 }
+
+#[test]
+fn cli_rename_preserves_the_slug_by_default_and_regenerates_on_request() {
+    let directory = tempdir().expect("temporary directory");
+    let workspace = directory.path().join("rename.mdtree");
+    run_json(&workspace, &["init", "Project"]);
+    let leaf = run_json(&workspace, &["create", "project", "Leaf"])["node_id"]
+        .as_str()
+        .expect("leaf id")
+        .to_owned();
+    let slug_and_title = |workspace: &Path| {
+        let node = &run_json(workspace, &["show", &leaf])[0];
+        (
+            node["slug"].as_str().expect("slug").to_owned(),
+            node["metadata"]["title"]
+                .as_str()
+                .expect("title")
+                .to_owned(),
+        )
+    };
+
+    run_json(
+        &workspace,
+        &["rename", &leaf, "Leaf Renamed", "--expected-version", "1"],
+    );
+    assert_eq!(
+        slug_and_title(&workspace),
+        ("leaf".into(), "Leaf Renamed".into())
+    );
+
+    run_json(
+        &workspace,
+        &[
+            "rename",
+            &leaf,
+            "Brand New",
+            "--slug",
+            "regenerate",
+            "--expected-version",
+            "2",
+        ],
+    );
+    assert_eq!(
+        slug_and_title(&workspace),
+        ("brand-new".into(), "Brand New".into())
+    );
+
+    // The node's own current slug never counts as a collision.
+    run_json(
+        &workspace,
+        &[
+            "rename",
+            &leaf,
+            "BRAND NEW",
+            "--slug",
+            "regenerate",
+            "--expected-version",
+            "3",
+        ],
+    );
+    assert_eq!(
+        slug_and_title(&workspace),
+        ("brand-new".into(), "BRAND NEW".into())
+    );
+
+    let batch_path = directory.path().join("rename-batch.json");
+    std::fs::write(
+        &batch_path,
+        serde_json::to_vec(&serde_json::json!({
+            "operations": [
+                {"kind":"rename", "selector":leaf, "title":"Batch Renamed", "expected_version":4}
+            ]
+        }))
+        .expect("batch JSON"),
+    )
+    .expect("write batch request");
+    run_json(
+        &workspace,
+        &["mutation-batch", batch_path.to_str().expect("path")],
+    );
+    assert_eq!(
+        slug_and_title(&workspace),
+        ("brand-new".into(), "Batch Renamed".into())
+    );
+}
