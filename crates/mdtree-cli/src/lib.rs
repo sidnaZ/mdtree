@@ -282,6 +282,20 @@ pub enum Command {
         #[arg(long, requires = "subtree")]
         depth: Option<u32>,
     },
+    /// Export a node and its subtree as a Word (`.docx`) document.
+    ///
+    /// Every node becomes a heading-led section in tree order. A root with
+    /// `toc-depth` metadata gets a table of contents (titled by `toc-title`),
+    /// nodes with `docx-exclude: true` are omitted with their subtrees, and
+    /// pages are numbered. An existing file is overwritten.
+    ExportDocx {
+        /// Destination `.docx` file.
+        file: PathBuf,
+        /// Export root selected by ID, slug, or canonical path; the
+        /// workspace root when omitted.
+        #[arg(long)]
+        root: Option<String>,
+    },
     /// Import a snapshot into a new workspace.
     Import {
         /// Snapshot source.
@@ -987,6 +1001,23 @@ pub fn execute(cli: &Cli, output: &mut dyn Write) -> anyhow::Result<u8> {
                 cli.output,
                 &serde_json::json!({
                     "exported_files": exported_files,
+                }),
+            )?;
+        }
+        Command::ExportDocx { file, root } => {
+            let root = match root {
+                Some(selector) => resolve_id(&store, selector)?,
+                None => store.root()?.id(),
+            };
+            let document = mdtree_web::subtree_docx(&store, root)?;
+            std::fs::write(file, &document.bytes)?;
+            emit(
+                output,
+                cli.output,
+                &serde_json::json!({
+                    "file": file,
+                    "root": root.to_string(),
+                    "nodes": document.nodes,
                 }),
             )?;
         }
@@ -3211,6 +3242,7 @@ mod tests {
             "restore",
             "export",
             "export-node",
+            "export-docx",
             "import",
             "rebuild-indexes",
             "prune-history",
@@ -3390,6 +3422,78 @@ mod tests {
             "2",
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn export_docx_writes_the_workspace_root_by_default_or_the_given_root() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().join("northstar.mdtree");
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/northstar-platform.snapshot.json");
+        assert_eq!(
+            run(
+                &workspace,
+                Command::Import {
+                    source: fixture,
+                    format: super::SnapshotFormat::Json,
+                },
+            )
+            .0,
+            EXIT_OK
+        );
+
+        let whole = directory.path().join("whole.docx");
+        let (code, whole_result) = run(
+            &workspace,
+            Command::ExportDocx {
+                file: whole.clone(),
+                root: None,
+            },
+        );
+        assert_eq!(code, EXIT_OK);
+        let root = super::open_store(&workspace)
+            .expect("store")
+            .root()
+            .expect("root")
+            .id();
+        assert_eq!(whole_result["root"], root.to_string());
+        assert!(std::fs::read(&whole)
+            .expect("docx")
+            .starts_with(b"PK\x03\x04"));
+
+        let branch = directory.path().join("architecture.docx");
+        let (code, branch_result) = run(
+            &workspace,
+            Command::ExportDocx {
+                file: branch.clone(),
+                root: Some("architecture".into()),
+            },
+        );
+        assert_eq!(code, EXIT_OK);
+        assert_ne!(branch_result["root"], whole_result["root"]);
+        assert!(
+            branch_result["nodes"].as_u64().expect("node count")
+                < whole_result["nodes"].as_u64().expect("node count")
+        );
+        assert_eq!(branch_result["file"], branch.to_string_lossy().as_ref());
+    }
+
+    #[test]
+    fn export_docx_requires_a_file_and_takes_an_optional_root() {
+        assert!(Cli::try_parse_from(["mdtree", "export-docx"]).is_err());
+        let parsed = Cli::try_parse_from([
+            "mdtree",
+            "export-docx",
+            "out.docx",
+            "--root",
+            "architecture",
+        ])
+        .expect("export-docx with root");
+        assert!(matches!(
+            parsed.command,
+            Some(Command::ExportDocx { ref file, root: Some(ref root) })
+                if file == Path::new("out.docx") && root == "architecture"
+        ));
     }
 
     #[test]

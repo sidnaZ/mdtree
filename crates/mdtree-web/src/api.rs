@@ -6,7 +6,7 @@ use std::str::FromStr;
 use std::sync::atomic::Ordering;
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use mdtree_core::{Node, NodeId, NodeMetadata, NodeSelector, ReferenceTarget, SemanticError};
@@ -409,4 +409,97 @@ pub(crate) async fn ancestors(
         .collect();
 
     Ok(Json(AncestorsResponse { ancestor_ids }))
+}
+
+const DOCX_MEDIA_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+/// Exports the selected node and its whole subtree as a `.docx` download in
+/// which every node is its own heading-led section (see `docx_export`).
+pub(crate) async fn export_docx(
+    State(state): State<AppState>,
+    Path((workspace, selector)): Path<(usize, String)>,
+) -> Result<Response, ApiError> {
+    let workspace = resolve_workspace(&state, workspace)?;
+    let subtree = {
+        let store = workspace
+            .store
+            .lock()
+            .expect("workspace store mutex poisoned");
+        let id = resolve_selector(&store, &selector)?;
+        store.subtree(id)?
+    };
+    let document =
+        tokio::task::spawn_blocking(move || crate::docx_export::docx_from_subtree(subtree))
+            .await
+            .map_err(|_| ApiError::NotFound)?;
+    let file_name = export_file_name(&document.root_title);
+    let mut response = Response::new(axum::body::Body::from(document.bytes));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(DOCX_MEDIA_TYPE),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&content_disposition(&file_name))
+            .unwrap_or_else(|_| HeaderValue::from_static("attachment; filename=export.docx")),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+/// A bounded, separator-free download name derived from the export root title.
+fn export_file_name(title: &str) -> String {
+    let name: String = title
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+                )
+            {
+                '_'
+            } else {
+                character
+            }
+        })
+        .take(100)
+        .collect();
+    let name = name.trim().trim_matches('.');
+    if name.is_empty() {
+        "export.docx".to_owned()
+    } else {
+        format!("{name}.docx")
+    }
+}
+
+/// `attachment` disposition with an ASCII fallback and an RFC 5987 UTF-8 name.
+fn content_disposition(file_name: &str) -> String {
+    use std::fmt::Write as _;
+    let mut encoded = String::with_capacity(file_name.len() * 3);
+    for byte in file_name.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            encoded.push(char::from(*byte));
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    format!("attachment; filename=export.docx; filename*=UTF-8''{encoded}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{content_disposition, export_file_name};
+
+    #[test]
+    fn export_file_names_are_separator_free_and_utf8_encoded() {
+        assert_eq!(export_file_name("a/b: c"), "a_b_ c.docx");
+        assert_eq!(export_file_name(" .. "), "export.docx");
+        assert_eq!(
+            content_disposition("Rokasgrāmata.docx"),
+            "attachment; filename=export.docx; filename*=UTF-8''Rokasgr%C4%81mata.docx"
+        );
+    }
 }

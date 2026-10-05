@@ -25,12 +25,15 @@ mod api;
 mod assets;
 mod change_hub;
 mod commands;
+mod docx_export;
 mod lifecycle;
 mod markdown;
 mod search;
 mod security;
 mod state;
 mod ws;
+
+pub use docx_export::{subtree_docx, DocxExport};
 
 use change_hub::CHANGE_CHANNEL_CAPACITY;
 use lifecycle::ClientActivity;
@@ -245,6 +248,10 @@ pub async fn run(workspaces: &[WorkspaceSource], options: BrowseUiOptions) -> an
         .route("/api/{workspace}/node/{selector}", get(api::node))
         .route("/api/{workspace}/node/{selector}/render", get(api::render))
         .route("/api/{workspace}/node/{selector}/source", get(api::source))
+        .route(
+            "/api/{workspace}/node/{selector}/export.docx",
+            get(api::export_docx),
+        )
         .route(
             "/api/{workspace}/node/{selector}/ancestors",
             get(api::ancestors),

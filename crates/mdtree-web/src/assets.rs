@@ -70,6 +70,23 @@ mod tests {
     }
 
     #[test]
+    fn the_node_card_menu_offers_export_docx_right_after_rename() {
+        let rename = INDEX_HTML
+            .find("id=\"node-card-menu-rename\"")
+            .expect("rename button");
+        let export = INDEX_HTML
+            .find("id=\"node-card-menu-export-docx\"")
+            .expect("export button");
+        let delete = INDEX_HTML
+            .find("id=\"node-card-menu-delete\"")
+            .expect("delete button");
+        assert!(rename < export && export < delete);
+        assert!(INDEX_HTML.contains("aria-label=\"Export DOCX\""));
+        assert!(APP_JS.contains("showTooltip(event.currentTarget, \"Export DOCX\", \"above\");"));
+        assert!(APP_JS.contains("/export.docx`"));
+    }
+
+    #[test]
     fn home_selects_the_root_and_visually_fits_it_like_the_f_shortcut() {
         assert!(APP_JS.contains(
             "if (event.key === \"Home\") {\n    event.preventDefault();\n    setSelected(state.root);\n    fitToView();"

@@ -2308,9 +2308,9 @@ function showNodeCardMenu(trigger, nodeId) {
   deleteItem.hidden = nodeId === state.root;
   const rect = trigger.getBoundingClientRect();
   // A row of icon-rail-button chips (see index.html), not the wider
-  // text-label list this used to be — narrow enough that even four of
+  // text-label list this used to be — narrow enough that even five of
   // them plus padding/gaps comfortably fits the smaller assumed width.
-  const assumedMenuWidth = 180;
+  const assumedMenuWidth = 220;
   const overflowsRight = rect.right + 8 + assumedMenuWidth > window.innerWidth;
   menu.style.left = `${Math.max(8, overflowsRight ? rect.left - assumedMenuWidth - 8 : rect.right + 8)}px`;
   menu.style.top = `${rect.top}px`;
@@ -4645,6 +4645,48 @@ document.getElementById("node-card-menu-rename").addEventListener("click", () =>
   }
 });
 
+// Downloads the node and its whole subtree as a Word document built by the
+// server (`/export.docx`, see docx_export.rs). Fetched rather than linked so
+// a failure is reported instead of being saved as a broken file.
+async function exportNodeDocx(id) {
+  const workspaceId = activeWorkspaceId;
+  const response = await fetch(
+    `/api/${workspaceId}/node/${encodeURIComponent(id)}/export.docx`,
+  );
+  if (!response.ok) {
+    window.alert(`MDTree could not export this node (${response.status}).`);
+    return;
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const encodedName = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+  let fileName = "export.docx";
+  try {
+    if (encodedName) {
+      fileName = decodeURIComponent(encodedName[1]);
+    }
+  } catch (_error) {
+    // Keep the generic name for a malformed header.
+  }
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.hidden = true;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+document.getElementById("node-card-menu-export-docx").addEventListener("click", () => {
+  const id = nodeCardMenuTargetId;
+  hideNodeCardMenu();
+  if (id) {
+    exportNodeDocx(id).catch(reportError);
+  }
+});
+
 document.getElementById("node-card-menu-delete").addEventListener("click", () => {
   const id = nodeCardMenuTargetId;
   hideNodeCardMenu();
@@ -4653,7 +4695,7 @@ document.getElementById("node-card-menu-delete").addEventListener("click", () =>
   }
 });
 
-// This menu's four actions are icon-only (see index.html, matching the
+// This menu's five actions are icon-only (see index.html, matching the
 // Fit/Expand/Collapse menus' own look), so each needs the shared hover
 // tooltip wired by hand instead of relying on visible text.
 document.getElementById("node-card-menu-focus").addEventListener("pointerenter", (event) => {
@@ -4668,6 +4710,10 @@ document.getElementById("node-card-menu-rename").addEventListener("pointerenter"
   showTooltip(event.currentTarget, "Rename node", "above");
 });
 document.getElementById("node-card-menu-rename").addEventListener("pointerleave", hideTooltip);
+document.getElementById("node-card-menu-export-docx").addEventListener("pointerenter", (event) => {
+  showTooltip(event.currentTarget, "Export DOCX", "above");
+});
+document.getElementById("node-card-menu-export-docx").addEventListener("pointerleave", hideTooltip);
 document.getElementById("node-card-menu-delete").addEventListener("pointerenter", (event) => {
   showTooltip(event.currentTarget, "Delete node", "above");
 });

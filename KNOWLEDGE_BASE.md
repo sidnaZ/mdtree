@@ -401,6 +401,28 @@ mdtree export-node architecture exported-architecture --subtree
 mdtree export-node architecture exported-architecture --subtree --depth 2
 ```
 
+Export a node and its whole subtree as one Word document (the workspace root
+when `--root` is omitted). The browse UI's node menu offers the same export as
+"Export DOCX"; both use `mdtree_web::subtree_docx`:
+
+```bash
+mdtree export-docx handbook.docx
+mdtree export-docx architecture.docx --root architecture
+```
+
+Every node becomes a heading at its tree depth followed by its Markdown body
+(tables, lists, code, `**bold**`, `*italic*`, `==highlight==`). Pages are
+numbered in the footer. Metadata on the export root controls the layout:
+
+- `"toc-depth": N` (N > 0) — page one holds the root's own content, page two a
+  table of contents listing N levels below the root, and every direct child of
+  the root starts on a new page.
+- `"toc-title": "…"` — the table of contents heading (default
+  "Table of contents").
+
+Any descendant with `"docx-exclude": true` is omitted together with its
+subtree; the selected root itself is always exported.
+
 The files in `examples/` are useful fixtures. See `examples/README.md` for
 commands and regeneration rules.
 
