@@ -4,11 +4,17 @@
 //! before insertion into the page: it must not be able to execute scripts,
 //! inject application controls, or reach session credentials.
 
+use std::fmt::Write as _;
+
+use mdtree_core::AssetUrl;
 use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag, TagEnd, TextMergeStream};
 
 /// Renders `markdown` to sanitized HTML safe to insert directly into the page.
+///
+/// `asset:` images become `<img>` elements served from `asset_base` (the
+/// workspace's `/api/{workspace}/asset/` route).
 #[must_use]
-pub(crate) fn render_sanitized_html(markdown: &str) -> String {
+pub(crate) fn render_sanitized_html(markdown: &str, asset_base: &str) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -17,17 +23,78 @@ pub(crate) fn render_sanitized_html(markdown: &str) -> String {
 
     let parser = TextMergeStream::new(Parser::new_ext(markdown, options));
     let mut unsafe_html = String::new();
-    html::push_html(&mut unsafe_html, with_highlights(parser));
+    html::push_html(
+        &mut unsafe_html,
+        with_highlights(with_asset_images(parser, asset_base)),
+    );
 
     ammonia::Builder::default()
         .add_tags(["input"])
         .add_tag_attributes("input", ["type", "checked", "disabled"])
+        .add_tag_attributes("img", ["title"])
         .add_generic_attributes(["id"])
         // External links never navigate the embedded browsing context or
         // leak it to the target page.
         .link_rel(Some("noopener noreferrer nofollow"))
         .clean(&unsafe_html)
         .to_string()
+}
+
+/// Replaces each `asset:` image with an `<img>` served by the workspace's
+/// asset route, carrying its alt text, title, and `?width=` percentage.
+/// Other images pass through unchanged (and unknown schemes are dropped by
+/// the sanitizer).
+fn with_asset_images<'a>(
+    events: impl Iterator<Item = Event<'a>>,
+    asset_base: &'a str,
+) -> impl Iterator<Item = Event<'a>> {
+    let mut active: Option<(AssetUrl, String, String)> = None;
+    events.filter_map(move |event| match event {
+        Event::Start(Tag::Image {
+            ref dest_url,
+            ref title,
+            ..
+        }) if active.is_none() => match AssetUrl::parse(dest_url) {
+            Some(url) => {
+                active = Some((url, title.to_string(), String::new()));
+                None
+            }
+            None => Some(event),
+        },
+        Event::Text(text) | Event::Code(text) if active.is_some() => {
+            if let Some((_, _, alt)) = active.as_mut() {
+                alt.push_str(&text);
+            }
+            None
+        }
+        Event::End(TagEnd::Image) if active.is_some() => {
+            let (url, title, alt) = active.take()?;
+            let mut tag = format!(
+                "<img src=\"{}{}\" alt=\"{}\"",
+                asset_base,
+                url.name,
+                escape_attribute(&alt)
+            );
+            if !title.is_empty() {
+                let _ = write!(tag, " title=\"{}\"", escape_attribute(&title));
+            }
+            if let Some(percent) = url.width_percent {
+                let _ = write!(tag, " width=\"{percent}%\"");
+            }
+            tag.push('>');
+            Some(Event::InlineHtml(tag.into()))
+        }
+        _ if active.is_some() => None,
+        other => Some(other),
+    })
+}
+
+fn escape_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Rewrites `==highlighted==` spans inside plain text into `<mark>` elements
@@ -120,16 +187,35 @@ fn highlight_spans(text: &str) -> Vec<(usize, usize)> {
 mod tests {
     use super::render_sanitized_html;
 
+    fn render(markdown: &str) -> String {
+        render_sanitized_html(markdown, "/api/0/asset/")
+    }
+
+    #[test]
+    fn asset_images_are_served_by_the_asset_route_with_width_and_title() {
+        let html = render("![The \"plan\"](asset:plan.png?width=60% \"Figure 1\")");
+        assert!(html.contains("src=\"/api/0/asset/plan.png\""), "{html}");
+        assert!(html.contains("alt=\"The &quot;plan&quot;\""), "{html}");
+        assert!(html.contains("title=\"Figure 1\""), "{html}");
+        assert!(html.contains("width=\"60%\""), "{html}");
+        let other = render("![x](asset:bad name.png) ![r](https://example.com/r.png)");
+        assert!(!other.contains("/api/0/asset/"), "{other}");
+        assert!(
+            other.contains("src=\"https://example.com/r.png\""),
+            "{other}"
+        );
+    }
+
     #[test]
     fn renders_double_equals_as_highlight() {
-        let html = render_sanitized_html("some ==a < b & c== here");
+        let html = render("some ==a < b & c== here");
         assert!(html.contains("<mark>a &lt; b &amp; c</mark>"), "{html}");
         assert!(html.contains("some ") && html.contains(" here"));
     }
 
     #[test]
     fn highlights_multiple_spans_and_inside_other_markup() {
-        let html = render_sanitized_html("==a== and ==b==\n\n# ==Title==\n\n**bold ==c== bold**");
+        let html = render("==a== and ==b==\n\n# ==Title==\n\n**bold ==c== bold**");
         assert!(html.contains("<mark>a</mark> and <mark>b</mark>"), "{html}");
         assert!(html.contains("<mark>Title</mark>"), "{html}");
         assert!(
@@ -147,27 +233,21 @@ mod tests {
             "x = y",
             "== ==",
         ] {
-            assert!(
-                !render_sanitized_html(source).contains("<mark>"),
-                "{source}"
-            );
+            assert!(!render(source).contains("<mark>"), "{source}");
         }
     }
 
     #[test]
     fn never_highlights_inside_code_or_image_alt() {
-        let html = render_sanitized_html(
-            "`==a==`\n\n```\n==b==\n```\n\n![==c==](https://example.com/p.png)",
-        );
+        let html = render("`==a==`\n\n```\n==b==\n```\n\n![==c==](https://example.com/p.png)");
         assert!(!html.contains("<mark>"), "{html}");
         assert!(html.contains("==a==") && html.contains("==b==") && html.contains("==c=="));
     }
 
     #[test]
     fn strips_script_tags_and_inline_event_handlers() {
-        let html = render_sanitized_html(
-            "before\n\n<script>alert('x')</script>\n\n<img src=x onerror=\"alert('y')\">",
-        );
+        let html =
+            render("before\n\n<script>alert('x')</script>\n\n<img src=x onerror=\"alert('y')\">");
         assert!(!html.contains("<script"));
         assert!(!html.contains("onerror"));
         assert!(html.contains("before"));
@@ -175,14 +255,13 @@ mod tests {
 
     #[test]
     fn strips_javascript_urls_from_links() {
-        let html = render_sanitized_html("[click me](javascript:alert('x'))");
+        let html = render("[click me](javascript:alert('x'))");
         assert!(!html.to_lowercase().contains("javascript:"));
     }
 
     #[test]
     fn preserves_task_list_checkboxes_and_tables() {
-        let html =
-            render_sanitized_html("- [x] done\n- [ ] todo\n\n| a | b |\n|---|---|\n| 1 | 2 |\n");
+        let html = render("- [x] done\n- [ ] todo\n\n| a | b |\n|---|---|\n| 1 | 2 |\n");
         assert!(html.contains("type=\"checkbox\""));
         assert!(html.contains("checked"));
         assert!(html.contains("<table"));
@@ -190,7 +269,7 @@ mod tests {
 
     #[test]
     fn renders_full_github_style_fidelity() {
-        let html = render_sanitized_html(
+        let html = render(
             "# Heading 1\n\n## Heading 2\n\n> a blockquote\n\n\
              * a list item\n* another\n\n1. first\n2. second\n\n\
              an inline `code span` here.\n\n\
@@ -212,7 +291,7 @@ mod tests {
 
     #[test]
     fn external_links_get_a_safe_rel_attribute() {
-        let html = render_sanitized_html("[a link](https://example.com)");
+        let html = render("[a link](https://example.com)");
         assert!(html.contains("rel=\"noopener noreferrer nofollow\""));
     }
 }

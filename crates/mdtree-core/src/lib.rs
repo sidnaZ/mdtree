@@ -1,5 +1,6 @@
 //! Domain model and application services for `MDTree`.
 
+mod asset;
 mod benchmark_fixture;
 mod context;
 mod error;
@@ -22,6 +23,10 @@ mod slug_generation;
 mod snapshot;
 mod subtree_diff;
 
+pub use asset::{
+    decode_base64, encode_base64, hash_asset, inspect_image, AssetError, AssetName, AssetRecord,
+    AssetUrl, ImageInfo, MediaType, ASSET_URL_SCHEME, MAX_ASSET_BYTES, MAX_ASSET_NAME_CHARS,
+};
 pub use benchmark_fixture::generate_benchmark_snapshot;
 pub use context::{
     ContextSummary, ConventionSummary, InspectionItem, ReadContext, SubtreeInspection, WriteContext,
@@ -71,7 +76,8 @@ pub use semantic::{
 };
 pub use slug_generation::{generate_slug, slug_for_rename, RenameSlugPolicy};
 pub use snapshot::{
-    validate_snapshot, RevisionPolicy, Snapshot, SnapshotNode, SnapshotValidationError,
-    SnapshotValidationReport, SnapshotWorkspace, SNAPSHOT_FORMAT_VERSION,
+    snapshot_format_version, validate_snapshot, RevisionPolicy, Snapshot, SnapshotAsset,
+    SnapshotNode, SnapshotValidationError, SnapshotValidationReport, SnapshotWorkspace,
+    MIN_SNAPSHOT_FORMAT_VERSION, SNAPSHOT_FORMAT_VERSION,
 };
 pub use subtree_diff::{diff_subtrees, SubtreeChange, SubtreeDiffItem};

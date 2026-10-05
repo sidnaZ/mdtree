@@ -1394,6 +1394,7 @@ async fn real_stdio_binary_initializes_and_serves_northstar_platform() {
     let cases = vec![
         ("root", serde_json::json!({})),
         ("workspace_status", serde_json::json!({})),
+        ("list_assets", serde_json::json!({})),
         ("semantic_index_status", serde_json::json!({})),
         ("validate", serde_json::json!({})),
         ("node", serde_json::json!({"selector":root_id})),

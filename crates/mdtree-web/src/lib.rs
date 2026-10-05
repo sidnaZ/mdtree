@@ -27,6 +27,7 @@ mod change_hub;
 mod commands;
 mod docx_export;
 mod docx_fonts;
+mod docx_images;
 mod lifecycle;
 mod markdown;
 mod search;
@@ -233,37 +234,7 @@ pub async fn run(workspaces: &[WorkspaceSource], options: BrowseUiOptions) -> an
     }
     let client_activity = Arc::clone(&state.client_activity);
 
-    let app = Router::new()
-        .route("/", get(assets::index))
-        .route("/app.js", get(assets::app_js))
-        .route("/style.css", get(assets::style_css))
-        .route("/vendor/easymde.min.js", get(assets::easymde_js))
-        .route("/vendor/easymde.min.css", get(assets::easymde_css))
-        .route("/api/workspaces", get(api::workspaces))
-        .route(
-            "/api/{workspace}/checkpoint",
-            post(api::checkpoint_workspace),
-        )
-        .route("/api/search", get(search::search))
-        .route("/api/semantic-index", get(search::semantic_status))
-        .route("/api/{workspace}/node/{selector}", get(api::node))
-        .route("/api/{workspace}/node/{selector}/render", get(api::render))
-        .route("/api/{workspace}/node/{selector}/source", get(api::source))
-        .route(
-            "/api/{workspace}/node/{selector}/export.docx",
-            get(api::export_docx),
-        )
-        .route(
-            "/api/{workspace}/node/{selector}/ancestors",
-            get(api::ancestors),
-        )
-        .route("/api/ws/{workspace}", get(ws::upgrade))
-        .route("/api/stop", post(lifecycle::stop))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            enforce_same_origin,
-        ))
-        .with_state(state);
+    let app = router(state);
     axum::serve(listener, app)
         .with_graceful_shutdown(lifecycle::shutdown_signal(shutdown_tx))
         .await?;
@@ -403,6 +374,48 @@ fn open_browser(url: &str) {
     if let Err(error) = outcome {
         tracing::warn!(%error, "failed to launch the default browser; use the printed URL instead");
     }
+}
+
+/// Every browse-UI route, behind same-origin enforcement.
+fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/", get(assets::index))
+        .route("/app.js", get(assets::app_js))
+        .route("/style.css", get(assets::style_css))
+        .route("/vendor/easymde.min.js", get(assets::easymde_js))
+        .route("/vendor/easymde.min.css", get(assets::easymde_css))
+        .route("/api/workspaces", get(api::workspaces))
+        .route(
+            "/api/{workspace}/checkpoint",
+            post(api::checkpoint_workspace),
+        )
+        .route("/api/search", get(search::search))
+        .route("/api/semantic-index", get(search::semantic_status))
+        .route("/api/{workspace}/node/{selector}", get(api::node))
+        .route("/api/{workspace}/node/{selector}/render", get(api::render))
+        .route("/api/{workspace}/node/{selector}/source", get(api::source))
+        .route(
+            "/api/{workspace}/node/{selector}/export.docx",
+            get(api::export_docx),
+        )
+        .route("/api/{workspace}/asset/{name}", get(api::asset))
+        .route(
+            "/api/{workspace}/asset",
+            post(api::upload_asset).layer(axum::extract::DefaultBodyLimit::max(
+                mdtree_core::MAX_ASSET_BYTES,
+            )),
+        )
+        .route(
+            "/api/{workspace}/node/{selector}/ancestors",
+            get(api::ancestors),
+        )
+        .route("/api/ws/{workspace}", get(ws::upgrade))
+        .route("/api/stop", post(lifecycle::stop))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            enforce_same_origin,
+        ))
+        .with_state(state)
 }
 
 #[cfg(test)]

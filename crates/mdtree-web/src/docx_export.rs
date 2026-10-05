@@ -17,7 +17,10 @@ use mdtree_core::{NodeId, NodeMetadata};
 use mdtree_sqlite::{NodeDepth, SqliteStore, StoreError};
 use serde_json::Value;
 
+use std::cell::Cell;
+
 use crate::docx_fonts::{CharWidths, Fonts};
+use crate::docx_images::{drawing, extent, ImageSet, EMU_PER_TWIP};
 
 /// A generated Word document and how many nodes it contains.
 #[derive(Clone, Debug)]
@@ -28,6 +31,8 @@ pub struct DocxExport {
     pub nodes: usize,
     /// Title of the exported root node.
     pub root_title: String,
+    /// `asset:` images whose asset does not exist (shown as a placeholder).
+    pub missing_images: usize,
 }
 
 /// Exports `root` and its subtree as a Word document: one heading-led
@@ -39,20 +44,20 @@ pub struct DocxExport {
 ///
 /// Returns the store's error when the subtree cannot be read.
 pub fn subtree_docx(store: &SqliteStore, root: NodeId) -> Result<DocxExport, StoreError> {
-    Ok(docx_from_subtree(store.subtree(root)?))
+    let (nodes, images) = read_export(store, root)?;
+    Ok(build_docx(&nodes, &images))
 }
 
-/// Builds the document from an already-read subtree, so a caller holding a
-/// lock can release it before the (CPU-only) document build.
-pub(crate) fn docx_from_subtree(subtree: Vec<NodeDepth>) -> DocxExport {
-    let nodes = export_nodes(subtree);
-    DocxExport {
-        bytes: build_docx(&nodes),
-        nodes: nodes.len(),
-        root_title: nodes
-            .first()
-            .map_or_else(String::new, |node| node.title.to_string()),
-    }
+/// Reads everything an export needs from the store (the subtree and the
+/// images it references), so a caller holding a lock can release it before
+/// the CPU-only [`build_docx`].
+pub(crate) fn read_export(
+    store: &SqliteStore,
+    root: NodeId,
+) -> Result<(Vec<ExportNode>, ImageSet), StoreError> {
+    let nodes = export_nodes(store.subtree(root)?);
+    let images = ImageSet::load(store, &nodes)?;
+    Ok((nodes, images))
 }
 
 /// One node of a depth-first subtree export. `depth` is relative to the
@@ -162,15 +167,42 @@ const MAX_HEADING_LEVEL: u32 = 9;
 /// Default heading of the table-of-contents page.
 const DEFAULT_TOC_TITLE: &str = "Table of contents";
 
-/// Builds a complete `.docx` document from depth-first export nodes.
+/// Renderer state shared by every paragraph of one document.
+pub(crate) struct RenderContext<'a> {
+    char_widths: CharWidths,
+    images: &'a ImageSet,
+    /// Next unique `wp:docPr` id.
+    next_drawing_id: Cell<u32>,
+    missing_images: Cell<usize>,
+    /// Widest an image may be where it is currently being written, in EMU.
+    max_image_width: Cell<u64>,
+}
+
+impl<'a> RenderContext<'a> {
+    fn new(char_widths: CharWidths, images: &'a ImageSet) -> Self {
+        Self {
+            char_widths,
+            images,
+            next_drawing_id: Cell::new(1),
+            missing_images: Cell::new(0),
+            max_image_width: Cell::new(TEXT_WIDTH_EMU),
+        }
+    }
+}
+
+/// The page's text width (A4 minus 2.54 cm margins) in EMU.
+const TEXT_WIDTH_EMU: u64 = TABLE_WIDTH_TWIPS as u64 * EMU_PER_TWIP;
+
+/// Builds a complete `.docx` document from depth-first export nodes and the
+/// images they reference.
 #[must_use]
-pub(crate) fn build_docx(nodes: &[ExportNode]) -> Vec<u8> {
+pub(crate) fn build_docx(nodes: &[ExportNode], images: &ImageSet) -> DocxExport {
     let title = nodes.first().map_or("", |node| &*node.title);
     let fonts = nodes
         .first()
         .and_then(|root| root.fonts.clone())
         .unwrap_or_default();
-    let char_widths = fonts.char_widths();
+    let context = RenderContext::new(fonts.char_widths(), images);
     // Depth zero is the root (Heading1), so at most eight levels below it
     // still have a Word outline heading of their own.
     let toc_depth = nodes
@@ -192,7 +224,7 @@ pub(crate) fn build_docx(nodes: &[ExportNode]) -> Vec<u8> {
         render_markdown(
             &mut body,
             strip_title_heading(&node.markdown, &node.title),
-            char_widths,
+            &context,
         );
         if let (0, Some(depth)) = (index, toc_depth) {
             let title = node.toc_title.as_deref().unwrap_or(DEFAULT_TOC_TITLE);
@@ -202,7 +234,8 @@ pub(crate) fn build_docx(nodes: &[ExportNode]) -> Vec<u8> {
     let document = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
          <w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" \
-         xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">\
+         xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" \
+         xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\">\
          <w:body>{body}<w:sectPr><w:footerReference w:type=\"default\" r:id=\"rId3\"/>\
          <w:pgSz w:w=\"11906\" w:h=\"16838\"/>\
          <w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" \
@@ -216,18 +249,33 @@ pub(crate) fn build_docx(nodes: &[ExportNode]) -> Vec<u8> {
     );
 
     let mut archive = ZipWriter::default();
-    archive.add("[Content_Types].xml", CONTENT_TYPES.as_bytes());
+    archive.add(
+        "[Content_Types].xml",
+        CONTENT_TYPES
+            .replacen("{images}", &images.content_types(), 1)
+            .as_bytes(),
+    );
     archive.add("_rels/.rels", ROOT_RELATIONSHIPS.as_bytes());
     archive.add("docProps/core.xml", core.as_bytes());
     archive.add(
         "word/_rels/document.xml.rels",
-        DOCUMENT_RELATIONSHIPS.as_bytes(),
+        DOCUMENT_RELATIONSHIPS
+            .replacen("{images}", &images.relationships(), 1)
+            .as_bytes(),
     );
     archive.add("word/styles.xml", styles(&fonts).as_bytes());
     archive.add("word/settings.xml", SETTINGS.as_bytes());
     archive.add("word/footer1.xml", FOOTER.as_bytes());
     archive.add("word/document.xml", document.as_bytes());
-    archive.finish()
+    for part in images.parts() {
+        archive.add(&format!("word/{}", part.path), &part.bytes);
+    }
+    DocxExport {
+        bytes: archive.finish(),
+        nodes: nodes.len(),
+        root_title: title.to_owned(),
+        missing_images: context.missing_images.get(),
+    }
 }
 
 /// A node heading; `page_break` starts it on a new page and `bookmark`
@@ -330,61 +378,121 @@ const HIGHLIGHT_FILL: &str = "FEF08A";
 struct Run {
     text: String,
     style: RunStyle,
+    /// An inline image instead of text.
+    image: Option<InlineImage>,
+}
+
+/// `![alt](destination "title")`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InlineImage {
+    alt: String,
+    destination: String,
+    title: String,
+}
+
+/// Parses an image at the start of `text`, returning it and the rest.
+fn markdown_image(text: &str) -> Option<(InlineImage, &str)> {
+    let rest = text.strip_prefix("![")?;
+    let close = rest.find("](")?;
+    let alt = &rest[..close];
+    let after_open = &rest[close + 2..];
+    let end = after_open.find(')')?;
+    let inner = after_open[..end].trim();
+    let (destination, title) = inner
+        .split_once(char::is_whitespace)
+        .map_or((inner, ""), |(destination, title)| {
+            (destination, title.trim())
+        });
+    let title = title
+        .strip_prefix('"')
+        .and_then(|title| title.strip_suffix('"'))
+        .or_else(|| {
+            title
+                .strip_prefix('\'')
+                .and_then(|title| title.strip_suffix('\''))
+        })
+        .unwrap_or(title);
+    if destination.is_empty() {
+        return None;
+    }
+    Some((
+        InlineImage {
+            alt: alt.to_owned(),
+            destination: destination.to_owned(),
+            title: title.to_owned(),
+        },
+        &after_open[end + 1..],
+    ))
+}
+
+/// The image when `line` consists of nothing but one image.
+fn standalone_image(line: &str) -> Option<InlineImage> {
+    let (image, rest) = markdown_image(line)?;
+    rest.trim().is_empty().then_some(image)
 }
 
 fn plain(text: &str) -> Run {
     Run {
         text: text.to_owned(),
         style: RunStyle::default(),
+        image: None,
     }
 }
 
-fn render_markdown(body: &mut String, markdown: &str, char_widths: CharWidths) {
+fn render_markdown(body: &mut String, markdown: &str, context: &RenderContext<'_>) {
     let mut pending: Vec<&str> = Vec::new();
     let mut table: Vec<&str> = Vec::new();
     let mut in_code = false;
     for line in markdown.lines() {
         let trimmed = line.trim();
         if !in_code && trimmed.starts_with('|') {
-            flush_paragraph(body, &mut pending);
+            flush_paragraph(body, &mut pending, context);
             table.push(trimmed);
             continue;
         }
-        flush_table(body, &mut table, char_widths);
+        flush_table(body, &mut table, context);
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            flush_paragraph(body, &mut pending);
+            flush_paragraph(body, &mut pending, context);
             in_code = !in_code;
             continue;
         }
         if in_code {
             let mut run = plain(line);
             run.style.code = true;
-            paragraph(body, Some("CodeBlock"), &[run]);
+            paragraph(body, Some("CodeBlock"), &[run], context);
             continue;
         }
         if trimmed.is_empty() {
-            flush_paragraph(body, &mut pending);
+            flush_paragraph(body, &mut pending, context);
             continue;
         }
         if let Some(heading) = markdown_heading(trimmed) {
-            flush_paragraph(body, &mut pending);
-            paragraph(body, Some("ContentHeading"), &inline_runs(heading));
+            flush_paragraph(body, &mut pending, context);
+            paragraph(body, Some("ContentHeading"), &inline_runs(heading), context);
         } else if let Some(item) = list_item(trimmed) {
-            flush_paragraph(body, &mut pending);
+            flush_paragraph(body, &mut pending, context);
             let mut runs = vec![plain(item.marker)];
             runs.extend(inline_runs(item.text));
-            paragraph(body, Some("ListItem"), &runs);
+            paragraph(body, Some("ListItem"), &runs, context);
         } else if let Some(quote) = trimmed.strip_prefix('>') {
-            flush_paragraph(body, &mut pending);
-            paragraph(body, Some("Quote"), &inline_runs(quote.trim_start()));
+            flush_paragraph(body, &mut pending, context);
+            paragraph(
+                body,
+                Some("Quote"),
+                &inline_runs(quote.trim_start()),
+                context,
+            );
         } else if is_horizontal_rule(trimmed) {
-            flush_paragraph(body, &mut pending);
+            flush_paragraph(body, &mut pending, context);
+        } else if let Some(image) = standalone_image(trimmed) {
+            flush_paragraph(body, &mut pending, context);
+            figure(body, image, context);
         } else {
             pending.push(trimmed);
         }
     }
-    flush_paragraph(body, &mut pending);
-    flush_table(body, &mut table, char_widths);
+    flush_paragraph(body, &mut pending, context);
+    flush_table(body, &mut table, context);
 }
 
 /// Word table width for an A4 page with 2.54 cm margins, in twentieths of a point.
@@ -399,7 +507,7 @@ const TABLE_BORDERS: &str = "<w:tblBorders><w:top w:val=\"nil\"/><w:left w:val=\
 /// Renders consecutive `|`-delimited lines as a Word table. A second-line
 /// delimiter row (`|---|:--:|`) marks the first row as a bold, repeating
 /// header and sets column alignment; without one every row is body text.
-fn flush_table(body: &mut String, lines: &mut Vec<&str>, char_widths: CharWidths) {
+fn flush_table(body: &mut String, lines: &mut Vec<&str>, context: &RenderContext<'_>) {
     if lines.is_empty() {
         return;
     }
@@ -425,7 +533,7 @@ fn flush_table(body: &mut String, lines: &mut Vec<&str>, char_widths: CharWidths
     if columns == 0 {
         return;
     }
-    let column_widths = column_widths(&rows, columns, char_widths);
+    let column_widths = column_widths(&rows, columns, context.char_widths);
 
     let _ = write!(
         body,
@@ -460,7 +568,11 @@ fn flush_table(body: &mut String, lines: &mut Vec<&str>, char_widths: CharWidths
                 }
             }
             let alignment = alignments.get(column).copied().flatten();
-            paragraph_with(body, Some("TableText"), alignment, &runs);
+            // Images in a cell are capped to the cell, not the page.
+            let cell_width = column_width.saturating_sub(CELL_PADDING_TWIPS).max(1) as u64;
+            let page_width = context.max_image_width.replace(cell_width * EMU_PER_TWIP);
+            paragraph_with(body, Some("TableText"), alignment, &runs, context);
+            context.max_image_width.set(page_width);
             body.push_str("</w:tc>");
         }
         body.push_str("</w:tr>");
@@ -605,13 +717,13 @@ fn column_alignment(delimiter: &str) -> Option<&'static str> {
     }
 }
 
-fn flush_paragraph(body: &mut String, pending: &mut Vec<&str>) {
+fn flush_paragraph(body: &mut String, pending: &mut Vec<&str>, context: &RenderContext<'_>) {
     if pending.is_empty() {
         return;
     }
     let joined = pending.join(" ");
     pending.clear();
-    paragraph(body, None, &inline_runs(&joined));
+    paragraph(body, None, &inline_runs(&joined), context);
 }
 
 fn markdown_heading(line: &str) -> Option<&str> {
@@ -680,6 +792,7 @@ fn inline_runs(text: &str) -> Vec<Run> {
                 runs.push(Run {
                     text: std::mem::take(current),
                     style,
+                    image: None,
                 });
             }
         };
@@ -719,6 +832,18 @@ fn inline_runs(text: &str) -> Vec<Run> {
             rest = &rest[1..];
             continue;
         }
+        if rest.starts_with("![") {
+            if let Some((image, after)) = markdown_image(rest) {
+                push_current(&mut runs, &mut current, style);
+                runs.push(Run {
+                    text: String::new(),
+                    style,
+                    image: Some(image),
+                });
+                rest = after;
+                continue;
+            }
+        }
         if character == '[' {
             if let Some((label, after)) = markdown_link(rest) {
                 current.push_str(label);
@@ -733,6 +858,7 @@ fn inline_runs(text: &str) -> Vec<Run> {
         runs.push(Run {
             text: current,
             style,
+            image: None,
         });
     }
     runs
@@ -780,11 +906,58 @@ fn markdown_link(text: &str) -> Option<(&str, &str)> {
     Some((label, &after_open[end + 1..]))
 }
 
-fn paragraph(body: &mut String, style: Option<&str>, runs: &[Run]) {
-    paragraph_with(body, style, None, runs);
+fn paragraph(body: &mut String, style: Option<&str>, runs: &[Run], context: &RenderContext<'_>) {
+    paragraph_with(body, style, None, runs, context);
 }
 
-fn paragraph_with(body: &mut String, style: Option<&str>, alignment: Option<&str>, runs: &[Run]) {
+/// An image alone on its line: a centred `Figure` paragraph, followed by a
+/// `Caption` paragraph when the image has a title.
+fn figure(body: &mut String, image: InlineImage, context: &RenderContext<'_>) {
+    let caption = image.title.clone();
+    let run = Run {
+        text: String::new(),
+        style: RunStyle::default(),
+        image: Some(image),
+    };
+    paragraph(body, Some("Figure"), &[run], context);
+    if !caption.is_empty() {
+        paragraph(body, Some("Caption"), &inline_runs(&caption), context);
+    }
+}
+
+/// Writes an image run: an embedded picture for a stored asset, visible
+/// placeholder text for a missing one, and `alt (url)` for any other URL
+/// (exports never fetch remote content).
+fn image_run(body: &mut String, image: &InlineImage, context: &RenderContext<'_>) {
+    let text = match mdtree_core::AssetUrl::parse(&image.destination) {
+        Some(url) => {
+            if let Some(part) = context.images.get(&url.name) {
+                let id = context.next_drawing_id.get();
+                context.next_drawing_id.set(id + 1);
+                let size = extent(part, url.width_percent, context.max_image_width.get());
+                body.push_str(&drawing(part, &image.alt, size, id));
+                return;
+            }
+            context.missing_images.set(context.missing_images.get() + 1);
+            format!("[missing image: {}]", url.name)
+        }
+        None if image.alt.is_empty() => image.destination.clone(),
+        None => format!("{} ({})", image.alt, image.destination),
+    };
+    let _ = write!(
+        body,
+        "<w:r><w:rPr><w:i/></w:rPr><w:t xml:space=\"preserve\">{}</w:t></w:r>",
+        escape(&text)
+    );
+}
+
+fn paragraph_with(
+    body: &mut String,
+    style: Option<&str>,
+    alignment: Option<&str>,
+    runs: &[Run],
+    context: &RenderContext<'_>,
+) {
     body.push_str("<w:p>");
     if style.is_some() || alignment.is_some() {
         body.push_str("<w:pPr>");
@@ -797,6 +970,10 @@ fn paragraph_with(body: &mut String, style: Option<&str>, alignment: Option<&str
         body.push_str("</w:pPr>");
     }
     for run in runs {
+        if let Some(image) = &run.image {
+            image_run(body, image, context);
+            continue;
+        }
         body.push_str("<w:r>");
         let style = run.style;
         if style.bold || style.italic || style.code || style.highlight {
@@ -847,7 +1024,7 @@ pub(crate) fn escape(text: &str) -> String {
 const CONTENT_TYPES: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
 <Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
 <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
-<Default Extension=\"xml\" ContentType=\"application/xml\"/>\
+<Default Extension=\"xml\" ContentType=\"application/xml\"/>{images}\
 <Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>\
 <Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>\
 <Override PartName=\"/word/settings.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml\"/>\
@@ -865,7 +1042,7 @@ const DOCUMENT_RELATIONSHIPS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" s
 <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
 <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>\
 <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings\" Target=\"settings.xml\"/>\
-<Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer\" Target=\"footer1.xml\"/>\
+<Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer\" Target=\"footer1.xml\"/>{images}\
 </Relationships>";
 
 /// Every page's footer: the current page number, right-aligned, as a live
@@ -912,12 +1089,17 @@ fn styles(fonts: &Fonts) -> String {
          <w:style w:type=\"paragraph\" w:styleId=\"CodeBlock\"><w:name w:val=\"Code Block\"/><w:basedOn w:val=\"Normal\"/>\
          <w:pPr><w:spacing w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/><w:ind w:left=\"284\"/></w:pPr>\
          {code_block}</w:style>\
-         <w:style w:type=\"character\" w:styleId=\"CodeChar\"><w:name w:val=\"Code Char\"/>{inline_code}</w:style>",
+         <w:style w:type=\"character\" w:styleId=\"CodeChar\"><w:name w:val=\"Code Char\"/>{inline_code}</w:style>\
+         <w:style w:type=\"paragraph\" w:styleId=\"Figure\"><w:name w:val=\"Figure\"/><w:basedOn w:val=\"Normal\"/>\
+         <w:pPr><w:keepNext/><w:spacing w:before=\"120\" w:after=\"60\"/><w:jc w:val=\"center\"/></w:pPr></w:style>\
+         <w:style w:type=\"paragraph\" w:styleId=\"Caption\"><w:name w:val=\"caption\"/><w:basedOn w:val=\"Normal\"/>\
+         <w:pPr><w:spacing w:after=\"200\"/><w:jc w:val=\"center\"/></w:pPr>{caption}</w:style>",
         body = fonts.body().style_rpr(true, "<w:lang w:val=\"en-US\"/>"),
         footer = fonts.footer().style_rpr(false, ""),
         table = fonts.table().style_rpr(false, ""),
         code_block = fonts.code_block().style_rpr(false, ""),
         inline_code = fonts.inline_code().style_rpr(false, ""),
+        caption = fonts.caption().style_rpr(false, ""),
     );
     // The table of contents title is styled like the root's own heading.
     let _ = write!(
@@ -1063,6 +1245,7 @@ mod tests {
         table_cells, TABLE_WIDTH_TWIPS,
     };
     use crate::docx_fonts::{CharWidths, Fonts};
+    use crate::docx_images::ImageSet;
 
     fn node(depth: u32, title: &str, markdown: &str) -> ExportNode {
         ExportNode {
@@ -1122,7 +1305,11 @@ mod tests {
 
     #[test]
     fn a_document_is_a_zip_package_with_every_required_part() {
-        let bytes = build_docx(&[node(0, "Root", "# Root\n\nIntro"), node(1, "Child", "Body")]);
+        let bytes = build_docx(
+            &[node(0, "Root", "# Root\n\nIntro"), node(1, "Child", "Body")],
+            &ImageSet::default(),
+        )
+        .bytes;
         assert_eq!(&bytes[..4], b"PK\x03\x04");
         for part in [
             "[Content_Types].xml",
@@ -1143,7 +1330,11 @@ mod tests {
     #[test]
     fn identical_trees_produce_identical_documents() {
         let nodes = [node(0, "Root", "Same content")];
-        assert_eq!(build_docx(&nodes), build_docx(&nodes));
+        let empty = ImageSet::default();
+        assert_eq!(
+            build_docx(&nodes, &empty).bytes,
+            build_docx(&nodes, &empty).bytes
+        );
     }
 
     #[test]
@@ -1178,7 +1369,7 @@ mod tests {
         render_markdown(
             &mut body,
             "Intro\n| Lauks | Vērtība |\n|---|--:|\n| Adrese | Rīga |\n| E-pasts | *precizējams* |\nAfter",
-            CharWidths::DEFAULT,
+            &super::RenderContext::new(CharWidths::DEFAULT, &ImageSet::default()),
         );
         assert_eq!(body.matches("<w:tbl>").count(), 1);
         assert_eq!(body.matches("<w:tr>").count(), 3);
@@ -1227,7 +1418,10 @@ mod tests {
     }
 
     fn package_part(nodes: &[ExportNode], part: &str) -> String {
-        let bytes = build_docx(nodes);
+        package_part_of(&build_docx(nodes, &ImageSet::default()).bytes, part)
+    }
+
+    fn package_part_of(bytes: &[u8], part: &str) -> String {
         // Entries are stored, so each part follows its local header.
         let name = part.as_bytes();
         // A name can also appear inside [Content_Types].xml, so match only a
@@ -1239,7 +1433,7 @@ mod tests {
             .expect("package part");
         let size = u32::from_le_bytes(bytes[header + 18..header + 22].try_into().unwrap()) as usize;
         let start = header + 30 + name.len();
-        String::from_utf8(bytes[start..start + size].to_vec()).expect("utf-8 part")
+        String::from_utf8_lossy(&bytes[start..start + size]).into_owned()
     }
 
     #[test]
@@ -1314,6 +1508,54 @@ mod tests {
         assert!(document.contains(
             "<w:rPr><w:rStyle w:val=\"CodeChar\"/></w:rPr><w:t xml:space=\"preserve\">code<"
         ));
+    }
+
+    #[test]
+    fn asset_images_are_embedded_as_figures_with_captions_and_capped_in_tables() {
+        let images = ImageSet::single("plan.png", 2000, 1000);
+        let nodes = [node(
+            0,
+            "Root",
+            "![The plan](asset:plan.png \"Figure 1. Plan\")\n\n\
+             Inline ![half](asset:plan.png?width=50%) and ![gone](asset:missing.png) and \
+             ![remote](https://example.com/r.png).\n\n| a | b |\n|---|---|\n| ![c](asset:plan.png) | x |",
+        )];
+        let export = build_docx(&nodes, &images);
+        assert_eq!(export.missing_images, 1);
+        let document = package_part_of(&export.bytes, "word/document.xml");
+        assert_eq!(document.matches("<w:drawing>").count(), 3);
+        assert!(document.contains("<w:pStyle w:val=\"Figure\"/>"));
+        assert!(document.contains(
+            "<w:pStyle w:val=\"Caption\"/></w:pPr><w:r><w:t xml:space=\"preserve\">Figure 1. Plan<"
+        ));
+        // Full text width for the figure (2000 px exceeds it), half for ?width=50%.
+        let full = super::TEXT_WIDTH_EMU;
+        assert!(document.contains(&format!("<wp:extent cx=\"{full}\" cy=\"{}\"/>", full / 2)));
+        assert!(document.contains(&format!("<wp:extent cx=\"{}\"", full / 2)));
+        assert!(document.contains("descr=\"The plan\""));
+        assert!(document.contains(">[missing image: missing.png]<"));
+        assert!(document.contains(">remote (https://example.com/r.png)<"));
+        // The table image is narrower than the page.
+        let cell = document
+            .rsplit("<wp:extent cx=\"")
+            .next()
+            .expect("cell image");
+        let cell_width: u64 = cell
+            .split('"')
+            .next()
+            .expect("width")
+            .parse()
+            .expect("number");
+        assert!(cell_width < full, "{cell_width}");
+        let relationships = package_part_of(&export.bytes, "word/_rels/document.xml.rels");
+        assert!(relationships.contains("Id=\"rIdImage1\""));
+        assert!(relationships.contains("Target=\"media/0011223344556677.png\""));
+        let content_types = package_part_of(&export.bytes, "[Content_Types].xml");
+        assert!(content_types.contains("<Default Extension=\"png\" ContentType=\"image/png\"/>"));
+        assert_eq!(
+            package_part_of(&export.bytes, "word/media/0011223344556677.png"),
+            String::from_utf8_lossy(b"\x89PNG")
+        );
     }
 
     #[test]

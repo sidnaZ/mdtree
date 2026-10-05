@@ -1,5 +1,6 @@
 //! Markdown parsing and snapshot support for `MDTree`.
 
+mod assets;
 mod derived;
 mod frontmatter;
 mod links;
@@ -7,6 +8,7 @@ mod sections;
 mod semantic;
 mod snapshot;
 
+pub use assets::extract_asset_references;
 pub use derived::{build_derived_records, DerivedNodeRecords, FtsDocument};
 pub use frontmatter::{parse_frontmatter, render_frontmatter, FrontmatterDocument};
 pub use links::{extract_markdown_links, extract_wikilinks, LinkKind, MarkdownLink, Wikilink};

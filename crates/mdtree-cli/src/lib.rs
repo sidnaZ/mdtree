@@ -306,6 +306,11 @@ pub enum Command {
     },
     /// Rebuild derived sections, references, and search rows.
     RebuildIndexes,
+    /// Store, list, export, or remove image assets used as `asset:<name>` in Markdown.
+    Asset {
+        #[command(subcommand)]
+        action: AssetCommand,
+    },
     /// Build, resume, inspect, retry, or clear the semantic index.
     SemanticIndex {
         #[command(subcommand)]
@@ -731,6 +736,42 @@ pub enum Command {
     Duplicates,
 }
 
+/// Image asset actions.
+///
+/// Reference a stored image from Markdown with standard image syntax:
+/// `![alt text](asset:<name>?width=80% "Optional caption")`.
+#[derive(Clone, Debug, Subcommand)]
+pub enum AssetCommand {
+    /// Store a PNG, JPEG, or GIF file (identified by its content, not its extension).
+    Add {
+        /// Image file to store.
+        file: PathBuf,
+        /// Asset name; derived from the file name when omitted.
+        #[arg(long)]
+        name: Option<String>,
+        /// Replace an existing asset with the same name.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// List every asset with its type, size, and pixel dimensions.
+    List,
+    /// Write an asset's image bytes to a file.
+    Export {
+        /// Asset name.
+        name: String,
+        /// Destination file (overwritten).
+        file: PathBuf,
+    },
+    /// Delete an asset; refused while any node references it unless `--force`.
+    Remove {
+        /// Asset name.
+        name: String,
+        /// Delete even if nodes still reference it.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 /// Semantic-index lifecycle actions.
 #[derive(Clone, Debug, Subcommand)]
 pub enum SemanticIndexCommand {
@@ -1018,6 +1059,7 @@ pub fn execute(cli: &Cli, output: &mut dyn Write) -> anyhow::Result<u8> {
                     "file": file,
                     "root": root.to_string(),
                     "nodes": document.nodes,
+                    "missing_images": document.missing_images,
                 }),
             )?;
         }
@@ -1025,6 +1067,7 @@ pub fn execute(cli: &Cli, output: &mut dyn Write) -> anyhow::Result<u8> {
             store.rebuild_derived(&SystemUlidGenerator)?;
             emit(output, cli.output, &serde_json::json!({"status":"rebuilt"}))?;
         }
+        Command::Asset { action } => execute_asset(cli, output, &mut store, action)?,
         Command::SemanticIndex { action } => {
             return execute_semantic_index(cli, output, &mut store, action);
         }
@@ -2722,6 +2765,74 @@ fn batch_current_node(
         .ok_or_else(|| anyhow::anyhow!("batch operation requires an existing node: {selector}"))
 }
 
+fn execute_asset(
+    cli: &Cli,
+    output: &mut dyn Write,
+    store: &mut SqliteStore,
+    action: &AssetCommand,
+) -> anyhow::Result<()> {
+    match action {
+        AssetCommand::Add {
+            file,
+            name,
+            replace,
+        } => {
+            let bytes = std::fs::read(file)?;
+            let info = mdtree_core::inspect_image(&bytes)?;
+            let name = match name {
+                Some(name) => name.parse()?,
+                None => {
+                    mdtree_core::AssetName::from_file_name(&file.to_string_lossy(), info.media_type)
+                }
+            };
+            let mode = if *replace {
+                mdtree_sqlite::AssetWriteMode::Replace
+            } else {
+                mdtree_sqlite::AssetWriteMode::Create
+            };
+            let record = store.put_asset(&name, &bytes, mode, now_millis()?)?;
+            emit(output, cli.output, &record)?;
+        }
+        AssetCommand::List => emit(output, cli.output, &store.assets()?)?,
+        AssetCommand::Export { name, file } => {
+            let name: mdtree_core::AssetName = name.parse()?;
+            let (record, bytes) = store
+                .asset_bytes(&name)?
+                .ok_or_else(|| anyhow::anyhow!("asset not found: {name}"))?;
+            std::fs::write(file, bytes)?;
+            emit(
+                output,
+                cli.output,
+                &serde_json::json!({"file": file, "asset": record}),
+            )?;
+        }
+        AssetCommand::Remove { name, force } => {
+            let name: mdtree_core::AssetName = name.parse()?;
+            let usages = store.asset_usages(&name)?;
+            if !usages.is_empty() && !*force {
+                anyhow::bail!(
+                    "asset {name} is referenced by {} node(s): {}; use --force to remove it anyway",
+                    usages.len(),
+                    usages
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            if !store.remove_asset(&name)? {
+                anyhow::bail!("asset not found: {name}");
+            }
+            emit(
+                output,
+                cli.output,
+                &serde_json::json!({"removed": name, "still_referenced_by": usages}),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn now_millis() -> anyhow::Result<u64> {
     Ok(std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -3243,6 +3354,7 @@ mod tests {
             "export",
             "export-node",
             "export-docx",
+            "asset",
             "import",
             "rebuild-indexes",
             "prune-history",

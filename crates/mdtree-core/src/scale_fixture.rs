@@ -9,7 +9,7 @@ use crate::{
     hash_content, hash_revision, NodeId, NodeMetadata, NodeRevision, NodeType, Reference,
     ReferenceOrigin, ReferenceTarget, ReferenceType, RevisionHashInput, RevisionPolicy,
     SequentialUlidGenerator, Slug, Snapshot, SnapshotNode, SnapshotWorkspace, UlidGenerator,
-    SNAPSHOT_FORMAT_VERSION,
+    MIN_SNAPSHOT_FORMAT_VERSION,
 };
 
 /// Default one-mebibyte serialized-response boundary used by scale tests.
@@ -235,7 +235,7 @@ pub fn generate_large_tree_fixture(spec: LargeTreeFixtureSpec, seed: u64) -> Lar
     LargeTreeFixture {
         snapshot: Snapshot {
             format: "mdtree-snapshot".into(),
-            format_version: SNAPSHOT_FORMAT_VERSION,
+            format_version: MIN_SNAPSHOT_FORMAT_VERSION,
             workspace: SnapshotWorkspace {
                 name: "Scale Workspace".into(),
                 workspace_format_version: 1,
@@ -244,6 +244,7 @@ pub fn generate_large_tree_fixture(spec: LargeTreeFixtureSpec, seed: u64) -> Lar
             nodes,
             revisions,
             references,
+            assets: Vec::new(),
         },
         root_id,
         wide_parent_id,

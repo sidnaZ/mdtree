@@ -9,13 +9,14 @@
 //!   "code":      { "family": "Courier New", "size": 9.5 },
 //!   "table":     { "size": 10 },
 //!   "toc":       { "size": 11 },
-//!   "footer":    { "size": 8, "color": "888888" }
+//!   "footer":    { "size": 8, "color": "888888" },
+//!   "caption":   { "size": 9, "italic": true }
 //! }
 //! ```
 //!
 //! Every role and property is optional. A role states only what it changes
 //! and inherits the rest: `heading-N` from `headings`, and `headings`,
-//! `table`, `toc` and `footer` from `body` (through Word's style
+//! `table`, `toc`, `footer` and `caption` from `body` (through Word's style
 //! inheritance). `code` keeps a monospace family unless one is given. Invalid
 //! values are ignored so a typo falls back to the default instead of
 //! breaking the export.
@@ -41,6 +42,8 @@ const DEFAULT_INLINE_CODE_SIZE: u32 = 20;
 const DEFAULT_FOOTER_SIZE: u32 = 18;
 const DEFAULT_HEADING_COLOR: &str = "1F3864";
 const DEFAULT_FOOTER_COLOR: &str = "6B7280";
+const DEFAULT_CAPTION_SIZE: u32 = 20;
+const DEFAULT_CAPTION_COLOR: &str = "555555";
 
 /// One role's font properties; `None` means "inherit".
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -132,6 +135,7 @@ pub(crate) struct Fonts {
     table: FontSpec,
     toc: FontSpec,
     footer: FontSpec,
+    caption: FontSpec,
 }
 
 impl Fonts {
@@ -149,6 +153,7 @@ impl Fonts {
             table: role("table"),
             toc: role("toc"),
             footer: role("footer"),
+            caption: role("caption"),
         }
     }
 
@@ -206,6 +211,16 @@ impl Fonts {
     pub(crate) fn toc(&self, level: usize) -> FontSpec {
         self.toc.or(&FontSpec {
             bold: (level == 2).then_some(true),
+            ..FontSpec::default()
+        })
+    }
+
+    /// Image captions (an image's Markdown title).
+    pub(crate) fn caption(&self) -> FontSpec {
+        self.caption.or(&FontSpec {
+            size: Some(DEFAULT_CAPTION_SIZE),
+            color: Some(DEFAULT_CAPTION_COLOR.into()),
+            italic: Some(true),
             ..FontSpec::default()
         })
     }

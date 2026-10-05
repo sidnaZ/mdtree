@@ -3,10 +3,39 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-use crate::{NodeHash, NodeId, NodeMetadata, NodeRevision, Reference, Slug};
+use crate::{
+    decode_base64, inspect_image, AssetName, MediaType, NodeHash, NodeId, NodeMetadata,
+    NodeRevision, Reference, Slug,
+};
 
 /// Latest JSON/Markdown snapshot format understood by this executable.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
+///
+/// Version 2 adds `assets`. Exports still write version 1 when a workspace
+/// has no assets, so asset-free snapshots stay readable by older versions.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 2;
+/// Oldest snapshot format still accepted for import.
+pub const MIN_SNAPSHOT_FORMAT_VERSION: u32 = 1;
+
+/// The snapshot format version needed to represent a workspace.
+#[must_use]
+pub const fn snapshot_format_version(has_assets: bool) -> u32 {
+    if has_assets {
+        SNAPSHOT_FORMAT_VERSION
+    } else {
+        MIN_SNAPSHOT_FORMAT_VERSION
+    }
+}
+
+/// One image asset carried by a snapshot.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SnapshotAsset {
+    /// Workspace-unique asset name.
+    pub name: AssetName,
+    /// Declared image format; must match the bytes.
+    pub media_type: MediaType,
+    /// Image bytes, standard padded base64.
+    pub data: String,
+}
 
 /// Explicit revision retention policy represented by a snapshot.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -71,6 +100,9 @@ pub struct Snapshot {
     pub revisions: Vec<NodeRevision>,
     /// Typed explicit/imported relationships and unresolved targets.
     pub references: Vec<Reference>,
+    /// Image assets (format version 2); omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assets: Vec<SnapshotAsset>,
 }
 
 /// One actionable snapshot validation error.
@@ -118,12 +150,47 @@ pub fn validate_snapshot(snapshot: &Snapshot) -> SnapshotValidationReport {
             format!("unsupported format {}", snapshot.format),
         );
     }
-    if snapshot.format_version != SNAPSHOT_FORMAT_VERSION {
+    if !(MIN_SNAPSHOT_FORMAT_VERSION..=SNAPSHOT_FORMAT_VERSION).contains(&snapshot.format_version) {
         push(
             "format_version",
             None,
             format!("unsupported snapshot version {}", snapshot.format_version),
         );
+    } else if snapshot.format_version < 2 && !snapshot.assets.is_empty() {
+        push(
+            "format_version",
+            None,
+            "assets require snapshot format version 2".into(),
+        );
+    }
+    let mut asset_names = HashSet::new();
+    for asset in &snapshot.assets {
+        if !asset_names.insert(&asset.name) {
+            push(
+                "asset_duplicate",
+                None,
+                format!("asset {} appears more than once", asset.name),
+            );
+        }
+        match decode_base64(&asset.data).map(|bytes| inspect_image(&bytes)) {
+            None => push(
+                "asset_data",
+                None,
+                format!("asset {} is not valid base64", asset.name),
+            ),
+            Some(Err(error)) => push("asset_data", None, format!("asset {}: {error}", asset.name)),
+            Some(Ok(info)) if info.media_type != asset.media_type => push(
+                "asset_media_type",
+                None,
+                format!(
+                    "asset {} is declared {} but contains {}",
+                    asset.name,
+                    asset.media_type.as_str(),
+                    info.media_type.as_str()
+                ),
+            ),
+            Some(Ok(_)) => {}
+        }
     }
     if snapshot.workspace.name.trim().is_empty() {
         push(

@@ -4,7 +4,7 @@ use rusqlite::{params, Connection, TransactionBehavior};
 use thiserror::Error;
 
 /// Latest schema migration understood by this executable.
-pub const LATEST_SCHEMA_VERSION: u32 = 7;
+pub const LATEST_SCHEMA_VERSION: u32 = 8;
 /// Canonical workspace data format created by this executable.
 pub const WORKSPACE_FORMAT_VERSION: u32 = 1;
 
@@ -43,6 +43,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 7,
         name: "semantic_index",
         sql: include_str!("../migrations/0007_semantic_index.sql"),
+    },
+    Migration {
+        version: 8,
+        name: "assets",
+        sql: include_str!("../migrations/0008_assets.sql"),
     },
 ];
 

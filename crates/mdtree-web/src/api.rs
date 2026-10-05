@@ -338,6 +338,7 @@ pub(crate) async fn render(
     State(state): State<AppState>,
     Path((workspace, selector)): Path<(usize, String)>,
 ) -> Result<Json<RenderResponse>, ApiError> {
+    let workspace_index = workspace;
     let workspace = resolve_workspace(&state, workspace)?;
     let store = workspace
         .store
@@ -347,7 +348,10 @@ pub(crate) async fn render(
     let node = store.get(id)?.ok_or(ApiError::NotFound)?;
 
     Ok(Json(RenderResponse {
-        html: render_sanitized_html(&node.fields().markdown_content),
+        html: render_sanitized_html(
+            &node.fields().markdown_content,
+            &format!("/api/{workspace_index}/asset/"),
+        ),
     }))
 }
 
@@ -421,16 +425,16 @@ pub(crate) async fn export_docx(
     Path((workspace, selector)): Path<(usize, String)>,
 ) -> Result<Response, ApiError> {
     let workspace = resolve_workspace(&state, workspace)?;
-    let subtree = {
+    let (nodes, images) = {
         let store = workspace
             .store
             .lock()
             .expect("workspace store mutex poisoned");
         let id = resolve_selector(&store, &selector)?;
-        store.subtree(id)?
+        crate::docx_export::read_export(&store, id)?
     };
     let document =
-        tokio::task::spawn_blocking(move || crate::docx_export::docx_from_subtree(subtree))
+        tokio::task::spawn_blocking(move || crate::docx_export::build_docx(&nodes, &images))
             .await
             .map_err(|_| ApiError::NotFound)?;
     let file_name = export_file_name(&document.root_title);
@@ -501,5 +505,113 @@ mod tests {
             content_disposition("Rokasgrāmata.docx"),
             "attachment; filename=export.docx; filename*=UTF-8''Rokasgr%C4%81mata.docx"
         );
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct AssetUploadQuery {
+    /// Original file name, used to derive the asset name.
+    name: Option<String>,
+}
+
+/// Serves one image asset with its stored media type. Content is untrusted:
+/// `nosniff` and a no-script CSP keep it inert even if opened directly.
+pub(crate) async fn asset(
+    State(state): State<AppState>,
+    Path((workspace, name)): Path<(usize, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let workspace = resolve_workspace(&state, workspace)?;
+    let name: mdtree_core::AssetName = name.parse().map_err(|_| ApiError::NotFound)?;
+    let (record, bytes) = {
+        let store = workspace
+            .store
+            .lock()
+            .expect("workspace store mutex poisoned");
+        store.asset_bytes(&name)?.ok_or(ApiError::NotFound)?
+    };
+    let etag = format!(
+        "\"{}\"",
+        record.hash.as_bytes()[..16]
+            .iter()
+            .fold(String::new(), |mut hex, byte| {
+                use std::fmt::Write as _;
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            })
+    );
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .is_some_and(|value| value.as_bytes() == etag.as_bytes())
+    {
+        return Ok(StatusCode::NOT_MODIFIED.into_response());
+    }
+    let mut response = Response::new(axum::body::Body::from(bytes));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(record.media_type.as_str()),
+    );
+    headers.insert(
+        header::HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; sandbox"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    if let Ok(etag) = HeaderValue::from_str(&etag) {
+        headers.insert(header::ETAG, etag);
+    }
+    Ok(response)
+}
+
+/// Stores an uploaded image (raw request body) as a new asset and returns
+/// its record; an identical image already stored under the name is reused,
+/// and a different one gets the next free `name-N`. Authenticated by the
+/// per-launch session credential like every other write.
+pub(crate) async fn upload_asset(
+    State(state): State<AppState>,
+    Path(workspace): Path<usize>,
+    axum::extract::Query(query): axum::extract::Query<AssetUploadQuery>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let supplied = headers
+        .get(SESSION_HEADER)
+        .and_then(|value| value.to_str().ok());
+    if supplied != Some(&*state.session_credential) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Ok(workspace) = resolve_workspace(&state, workspace) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let info = match mdtree_core::inspect_image(&body) {
+        Ok(info) => info,
+        Err(error) => {
+            return (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()).into_response();
+        }
+    };
+    let name = mdtree_core::AssetName::from_file_name(
+        query.name.as_deref().unwrap_or("image"),
+        info.media_type,
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        });
+    let result = workspace
+        .store
+        .lock()
+        .expect("workspace store mutex poisoned")
+        .put_asset(&name, &body, mdtree_sqlite::AssetWriteMode::Unique, now);
+    match result {
+        Ok(record) => (StatusCode::CREATED, Json(record)).into_response(),
+        Err(StoreError::Asset(error)) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()).into_response()
+        }
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
 }

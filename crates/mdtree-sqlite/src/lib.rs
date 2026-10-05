@@ -1,5 +1,6 @@
 //! `SQLite` persistence adapter for `MDTree`.
 
+mod assets;
 mod connection;
 mod context;
 mod maintenance;
@@ -15,6 +16,7 @@ mod workspace;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
+pub use assets::AssetWriteMode;
 pub use connection::{open_connection, open_memory_connection};
 pub use maintenance::{
     backup_workspace, check_workspace, checkpoint_workspace, doctor_workspace, restore_workspace,

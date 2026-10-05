@@ -7,14 +7,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mdtree_core::{
-    NodeHash, NodeId, NodeMetadata, NodeRevision, Reference, RevisionPolicy, Slug, Snapshot,
-    SnapshotNode, SnapshotWorkspace,
+    decode_base64, encode_base64, AssetName, MediaType, NodeHash, NodeId, NodeMetadata,
+    NodeRevision, Reference, RevisionPolicy, Slug, Snapshot, SnapshotAsset, SnapshotNode,
+    SnapshotWorkspace,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const MANIFEST: &str = "workspace.yaml";
 const NODE_FILE: &str = "node.md";
+/// Image assets live beside the root node; child node directories are always
+/// named `NNNNNNNNNN-slug--id`, so this name can never collide with one.
+const ASSET_DIRECTORY: &str = "_assets";
 
 /// Markdown snapshot filesystem or serialization failure.
 #[derive(Debug, Error)]
@@ -38,6 +42,15 @@ struct Manifest {
     revision_policy: RevisionPolicy,
     revisions: Vec<NodeRevision>,
     references: Vec<Reference>,
+    /// Assets stored as `_assets/<name>` files (format version 2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    assets: Vec<ManifestAsset>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ManifestAsset {
+    name: AssetName,
+    media_type: MediaType,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -78,8 +91,26 @@ pub fn export_markdown_snapshot(
             revision_policy: snapshot.revision_policy,
             revisions: snapshot.revisions.clone(),
             references: snapshot.references.clone(),
+            assets: snapshot
+                .assets
+                .iter()
+                .map(|asset| ManifestAsset {
+                    name: asset.name.clone(),
+                    media_type: asset.media_type,
+                })
+                .collect(),
         },
     )?;
+    if !snapshot.assets.is_empty() {
+        let directory = output.join(ASSET_DIRECTORY);
+        fs::create_dir(&directory)?;
+        for asset in &snapshot.assets {
+            let bytes = decode_base64(&asset.data).ok_or_else(|| {
+                MarkdownSnapshotError::Layout(format!("asset {} is not valid base64", asset.name))
+            })?;
+            fs::write(directory.join(asset.name.as_str()), bytes)?;
+        }
+    }
     let by_parent = children_by_parent(snapshot);
     let root = by_parent
         .get(&None)
@@ -271,6 +302,18 @@ pub fn parse_markdown_snapshot(path: &Path) -> Result<Snapshot, MarkdownSnapshot
     let manifest: Manifest = serde_yaml::from_slice(&fs::read(path.join(MANIFEST))?)?;
     let mut nodes = Vec::new();
     read_node_tree(path, None, &mut nodes)?;
+    let assets = manifest
+        .assets
+        .into_iter()
+        .map(|asset| {
+            let bytes = fs::read(path.join(ASSET_DIRECTORY).join(asset.name.as_str()))?;
+            Ok(SnapshotAsset {
+                name: asset.name,
+                media_type: asset.media_type,
+                data: encode_base64(&bytes),
+            })
+        })
+        .collect::<Result<Vec<_>, MarkdownSnapshotError>>()?;
     Ok(Snapshot {
         format: manifest.format,
         format_version: manifest.format_version,
@@ -279,6 +322,7 @@ pub fn parse_markdown_snapshot(path: &Path) -> Result<Snapshot, MarkdownSnapshot
         nodes,
         revisions: manifest.revisions,
         references: manifest.references,
+        assets,
     })
 }
 
@@ -328,6 +372,7 @@ fn read_node_tree(
     let mut children = fs::read_dir(directory)?
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| expected_parent.is_some() || entry.file_name() != ASSET_DIRECTORY)
         .map(|entry| entry.path())
         .collect::<Vec<PathBuf>>();
     children.sort();

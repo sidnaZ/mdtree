@@ -65,6 +65,12 @@ pub enum StoreError {
     /// Metadata JSON failure.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    /// Image asset is invalid (name, type, size, or content).
+    #[error(transparent)]
+    Asset(#[from] mdtree_core::AssetError),
+    /// An asset with this name already exists and replacement was not requested.
+    #[error("asset already exists: {0}")]
+    AssetExists(String),
 }
 
 /// Traversal node and relative depth.
@@ -912,6 +918,7 @@ impl SqliteStore {
             ));
         }
         append_semantic_integrity_findings(&self.connection, &mut findings)?;
+        findings.extend(self.asset_integrity_findings()?);
         Ok(IntegrityReport { findings })
     }
 
@@ -2769,10 +2776,10 @@ fn history_prune_report(connection: &Connection) -> Result<HistoryPruneReport, S
     })
 }
 
-fn integer(value: u64) -> Result<i64, StoreError> {
+pub(crate) fn integer(value: u64) -> Result<i64, StoreError> {
     i64::try_from(value).map_err(|_| StoreError::InvalidData("integer range".into()))
 }
-fn nonnegative(value: i64) -> Result<u64, StoreError> {
+pub(crate) fn nonnegative(value: i64) -> Result<u64, StoreError> {
     u64::try_from(value).map_err(|_| StoreError::InvalidData("negative integer".into()))
 }
 

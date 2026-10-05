@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::{
     hash_content, hash_revision, NodeId, NodeMetadata, NodeType, Reference, ReferenceOrigin,
     ReferenceTarget, ReferenceType, RevisionHashInput, RevisionPolicy, SequentialUlidGenerator,
-    Slug, Snapshot, SnapshotNode, SnapshotWorkspace, UlidGenerator, SNAPSHOT_FORMAT_VERSION,
+    Slug, Snapshot, SnapshotNode, SnapshotWorkspace, UlidGenerator, MIN_SNAPSHOT_FORMAT_VERSION,
 };
 
 const FIXED_TIME: u64 = 1_750_000_000_000;
@@ -227,7 +227,7 @@ fn build_snapshot(
         .collect();
     Snapshot {
         format: "mdtree-snapshot".into(),
-        format_version: SNAPSHOT_FORMAT_VERSION,
+        format_version: MIN_SNAPSHOT_FORMAT_VERSION,
         workspace: SnapshotWorkspace {
             name: name.into(),
             workspace_format_version: 1,
@@ -236,6 +236,7 @@ fn build_snapshot(
         nodes,
         revisions: Vec::new(),
         references,
+        assets: Vec::new(),
     }
 }
 

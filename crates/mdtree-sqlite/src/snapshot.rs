@@ -6,13 +6,14 @@ use std::path::Path;
 use std::str::FromStr;
 
 use mdtree_core::{
-    validate_snapshot, Node, NodeFields, NodeId, NodeRevision, RevisionPolicy, Snapshot,
-    SnapshotNode, SnapshotValidationReport, SnapshotWorkspace, SystemUlidGenerator,
-    SNAPSHOT_FORMAT_VERSION,
+    snapshot_format_version, validate_snapshot, Clock, Node, NodeFields, NodeId, NodeRevision,
+    RevisionPolicy, Snapshot, SnapshotNode, SnapshotValidationReport, SnapshotWorkspace,
+    SystemClock, SystemUlidGenerator,
 };
 use tempfile::tempdir_in;
 use thiserror::Error;
 
+use crate::assets::insert_snapshot_asset;
 use crate::store::{insert_node, insert_reference, insert_revision, replace_derived};
 use crate::{create_workspace, SqliteStore, StoreError, WorkspaceError, WORKSPACE_FORMAT_VERSION};
 
@@ -84,9 +85,10 @@ pub fn export_snapshot(store: &SqliteStore) -> Result<Snapshot, SnapshotError> {
     }
     revisions.sort_by_key(|revision| (revision.node_id, revision.version));
     references.sort_by_key(|reference| serde_json::to_string(reference).unwrap_or_default());
+    let assets = store.snapshot_assets()?;
     Ok(Snapshot {
         format: "mdtree-snapshot".into(),
-        format_version: SNAPSHOT_FORMAT_VERSION,
+        format_version: snapshot_format_version(!assets.is_empty()),
         workspace: SnapshotWorkspace {
             name: workspace_name,
             workspace_format_version: WORKSPACE_FORMAT_VERSION,
@@ -95,6 +97,7 @@ pub fn export_snapshot(store: &SqliteStore) -> Result<Snapshot, SnapshotError> {
         nodes,
         revisions,
         references,
+        assets,
     })
 }
 
@@ -233,6 +236,10 @@ pub fn import_snapshot_new(path: &Path, snapshot: &Snapshot) -> Result<(), Snaps
     }
     for reference in &snapshot.references {
         insert_reference(&transaction, reference)?;
+    }
+    let imported_at = SystemClock.now_millis();
+    for asset in &snapshot.assets {
+        insert_snapshot_asset(&transaction, asset, imported_at)?;
     }
     transaction.commit().map_err(StoreError::from)?;
     store

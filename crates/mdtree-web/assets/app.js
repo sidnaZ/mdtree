@@ -2885,7 +2885,7 @@ const EDITOR_TOOLBAR = [
   { name: "highlight", action: toggleHighlight, className: "fa fa-highlighter", title: "Highlight (Ctrl-Shift-H)" },
   "heading", "|",
   "quote", "unordered-list", "ordered-list", "|",
-  "link", "image", "code", "|",
+  "link", "image", "upload-image", "code", "|",
   "preview", "side-by-side", "fullscreen",
 ];
 
@@ -2898,10 +2898,21 @@ function createMarkdownEditor(textarea, initialValue) {
     status: false,
     toolbar: EDITOR_TOOLBAR,
     minHeight: "0",
-    // EasyMDE's bundled `marked` doesn't know `==text==`, so its preview
-    // gets the same highlight pass the server applies to the viewer.
+    // Pasted, dropped, or toolbar-chosen images are stored as workspace
+    // assets (see uploadEditorImage) and referenced as `asset:<name>`.
+    uploadImage: true,
+    imageAccept: "image/png, image/jpeg, image/gif",
+    imageMaxSize: MAX_ASSET_BYTES,
+    imageUploadFunction(file, _onSuccess, onError) {
+      uploadEditorImage(editor, file).catch((error) => onError(error.message));
+    },
+    errorCallback(message) {
+      window.alert(message);
+    },
+    // EasyMDE's bundled `marked` doesn't know `==text==` or `asset:` images,
+    // so its preview gets the same passes the server applies to the viewer.
     previewRender(plainText) {
-      return highlightMarks(this.parent.markdown(plainText));
+      return highlightMarks(resolveAssetImages(this.parent.markdown(plainText)));
     },
   });
   editor.codemirror.addKeyMap({
@@ -2909,6 +2920,67 @@ function createMarkdownEditor(textarea, initialValue) {
     "Shift-Cmd-H": () => toggleHighlight(editor),
   });
   return editor;
+}
+
+// Matches mdtree_core::MAX_ASSET_BYTES; the server enforces the same bound.
+const MAX_ASSET_BYTES = 20 * 1024 * 1024;
+
+// Stores `file` as an asset of the active workspace (an identical image
+// already stored is reused; a different one with the same name gets `-N`)
+// and inserts an image referencing it, alt text taken from the file name.
+async function uploadEditorImage(editor, file) {
+  const workspaceId = activeWorkspaceId;
+  const response = await fetch(
+    `/api/${workspaceId}/asset?name=${encodeURIComponent(file.name)}`,
+    {
+      method: "POST",
+      headers: { "x-mdtree-session": sessionCredential, "Content-Type": file.type || "application/octet-stream" },
+      body: file,
+    },
+  );
+  if (!response.ok) {
+    const reason = (await response.text()) || `HTTP ${response.status}`;
+    throw new Error(`Could not upload ${file.name}: ${reason}`);
+  }
+  const asset = await response.json();
+  const alt = file.name.replace(/\.[^.]*$/, "").replace(/[[\]]/g, "");
+  const cm = editor.codemirror;
+  const image = `![${alt}](asset:${asset.name})`;
+  // At either end of a non-empty line the image becomes its own paragraph
+  // (a figure in DOCX exports) instead of gluing onto the text; mid-line it
+  // stays inline.
+  const cursor = cm.getCursor("from");
+  const line = cm.getLine(cursor.line);
+  const before = line.slice(0, cursor.ch).trim();
+  const after = line.slice(cm.getCursor("to").ch).trim();
+  let text = image;
+  if (!before && after) {
+    text = `${image}\n\n`;
+  } else if (before && !after) {
+    text = `\n\n${image}`;
+  }
+  cm.replaceSelection(text);
+  cm.focus();
+}
+
+// Points `asset:<name>[?width=N%]` images at the workspace's asset route,
+// mirroring the server renderer (markdown.rs `with_asset_images`).
+function resolveAssetImages(html) {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  for (const image of template.content.querySelectorAll('img[src^="asset:"]')) {
+    const [name, query = ""] = image.getAttribute("src").slice("asset:".length).split("?");
+    if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(name)) {
+      image.removeAttribute("src");
+      continue;
+    }
+    image.setAttribute("src", `/api/${activeWorkspaceId}/asset/${name}`);
+    const width = /(?:^|&)width=(\d{1,3})%?(?:&|$)/.exec(query);
+    if (width && Number(width[1]) >= 1 && Number(width[1]) <= 100) {
+      image.setAttribute("width", `${width[1]}%`);
+    }
+  }
+  return template.innerHTML;
 }
 
 // Wraps the selection in `==` (with nothing selected, inserts an empty

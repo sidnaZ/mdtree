@@ -35,7 +35,7 @@ Current source-of-truth compatibility values are:
 - package version: `0.2.0`;
 - minimum Rust version: `1.88`;
 - workspace format: `1`;
-- SQLite schema version: `7`.
+- SQLite schema version: `8`.
 
 The package version comes from the root `Cargo.toml`. Format and schema versions
 come from `crates/mdtree-sqlite/src/migrations.rs`. Do not infer current
@@ -429,23 +429,76 @@ numbered in the footer. Metadata on the export root controls the layout:
     "code":      { "family": "Courier New", "size": 9.5 },
     "table":     { "size": 10 },
     "toc":       { "size": 11 },
-    "footer":    { "size": 8, "color": "888888" }
+    "footer":    { "size": 8, "color": "888888" },
+    "caption":   { "size": 9 }
   }
   ```
 
   Roles: `body` (all text, inherited by every other role), `headings` (node
   headings and the table of contents title), `heading-1` … `heading-9` (one
   level; 1 is the export root), `code` (inline code and code blocks; stays
-  monospace unless `family` is set), `table`, `toc` (entries) and `footer`
-  (page number). Properties, all optional: `family`, `size` (points, halves
+  monospace unless `family` is set), `table`, `toc` (entries), `footer`
+  (page number) and `caption` (image captions; default 10 pt grey italic). Properties, all optional: `family`, `size` (points, halves
   allowed, 4–96), `color` (`RRGGBB`, optional `#`), `bold`, `italic`. A role
   sets only what it changes; invalid values and unknown roles are ignored.
   Fonts are not embedded, so readers without a font see a substitute. Each
   role is a Word style (`Normal`, `Heading1`–`9`, `CodeBlock`/`CodeChar`,
-  `TableText`, `TOC1`–`9`, `Footer`), so it can be restyled in Word later.
+  `TableText`, `TOC1`–`9`, `Footer`, `Caption`), so it can be restyled in
+  Word later.
 
 Any descendant with `"docx-exclude": true` is omitted together with its
 subtree; the selected root itself is always exported.
+
+### Images
+
+Images are stored inside the workspace database as named assets, so the
+`.mdtree` file stays the single portable unit (backup, restore, checkpoint and
+copying keep working unchanged). Identical bytes are stored once. PNG, JPEG and
+GIF up to 20 MiB are accepted; the type is detected from the file content, not
+its extension. Reference an asset from any node with standard image syntax:
+
+```markdown
+![NIS architecture](asset:NIS-arhitektura.png?width=80% "Figure 1. NIS architecture")
+```
+
+The alt text describes the image (search and MCP see only text). `?width=` is
+an optional percentage of the available text width; without it an image is
+shown at its natural size, never wider than the text. The quoted title is the
+caption.
+
+```bash
+mdtree asset add diagrams/NIS-arhitektura.png            # name from the file
+mdtree asset add photo.jpg --name team.jpeg --replace    # explicit name, replace
+mdtree asset list
+mdtree asset export NIS-arhitektura.png copy.png
+mdtree asset remove NIS-arhitektura.png                  # refused while referenced
+```
+
+Asset names use ASCII letters, digits, `.`, `_` and `-`; names derived from
+file names fold diacritics (`Ekrāna attēls.png` → `Ekrana-attels.png`).
+`mdtree validate` reports a `missing_asset` finding for every reference to an
+asset that does not exist, and `asset_hash` for corrupt stored bytes.
+
+- **Web UI:** the viewer serves assets from `/api/{workspace}/asset/{name}`
+  (`nosniff`, no-script CSP). In the editor, paste or drop an image, or use the
+  upload toolbar button; it is stored as an asset (an identical image is
+  reused, a different one with the same name gets `-2`, `-3`, …) and inserted
+  at the cursor, as its own paragraph when the cursor is at either end of a
+  line.
+- **DOCX export:** an image alone on its line becomes a centred figure with its
+  title as a caption below; images inside text or table cells are inline and
+  capped to the cell. A missing asset prints *[missing image: name]* (the CLI
+  report counts `missing_images`); remote images are never fetched and appear
+  as "alt (url)".
+- **Snapshots:** JSON snapshots carry assets as base64 (`assets`, snapshot
+  format version 2); Markdown snapshots write them to `_assets/` next to the
+  root `node.md`. Workspaces without assets still export format version 1.
+- **MCP:** the read-only `list_assets` tool returns names, types, sizes,
+  dimensions and the nodes using each image, never the bytes.
+
+Schema 8 adds the asset tables. Opening an older workspace upgrades it, after
+which older `mdtree` binaries refuse it, so upgrade every binary that shares a
+workspace (including `mdtree-mcp`).
 
 The files in `examples/` are useful fixtures. See `examples/README.md` for
 commands and regeneration rules.

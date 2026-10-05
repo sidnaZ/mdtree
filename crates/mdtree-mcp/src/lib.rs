@@ -738,6 +738,23 @@ impl MdtreeServer {
         )
     }
 
+    #[tool(
+        description = "List image assets referenced from Markdown as ![alt](asset:<name>): name, media type, byte size, pixel dimensions, and the IDs of nodes that use each. Image bytes are never returned"
+    )]
+    async fn list_assets(&self) -> Result<CallToolResult, ErrorData> {
+        let store = self.store()?;
+        let assets = store
+            .assets()
+            .map_err(store_error)?
+            .into_iter()
+            .map(|asset| {
+                let used_by = store.asset_usages(&asset.name).map_err(store_error)?;
+                Ok(serde_json::json!({ "asset": asset, "used_by": used_by }))
+            })
+            .collect::<Result<Vec<_>, ErrorData>>()?;
+        json_result(assets)
+    }
+
     #[tool(description = "Report the active semantic profile, coverage, state, and revision")]
     async fn semantic_index_status(&self) -> Result<CallToolResult, ErrorData> {
         let store = self.store()?;
@@ -1912,6 +1929,7 @@ mod tests {
             "resolve_reference",
             "workspace_status",
             "semantic_index_status",
+            "list_assets",
             "validate",
         ] {
             assert!(names.contains(&required), "missing {required}");
@@ -2034,6 +2052,7 @@ mod tests {
         let tool_cases = vec![
             ("workspace_status", serde_json::json!({})),
             ("semantic_index_status", serde_json::json!({})),
+            ("list_assets", serde_json::json!({})),
             ("node", serde_json::json!({"selector":root_id})),
             ("batch_nodes", serde_json::json!({"selectors":[root_id]})),
             (

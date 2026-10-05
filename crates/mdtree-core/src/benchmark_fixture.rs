@@ -6,7 +6,7 @@ use std::str::FromStr;
 use crate::{
     hash_content, hash_revision, NodeId, NodeMetadata, NodeType, Reference, ReferenceOrigin,
     ReferenceTarget, ReferenceType, RevisionHashInput, RevisionPolicy, SequentialUlidGenerator,
-    Slug, Snapshot, SnapshotNode, SnapshotWorkspace, UlidGenerator, SNAPSHOT_FORMAT_VERSION,
+    Slug, Snapshot, SnapshotNode, SnapshotWorkspace, UlidGenerator, MIN_SNAPSHOT_FORMAT_VERSION,
 };
 
 /// Generates a deterministic representative snapshot with bounded branching.
@@ -96,7 +96,7 @@ pub fn generate_benchmark_snapshot(node_count: usize, seed: u64) -> Snapshot {
     }
     Snapshot {
         format: "mdtree-snapshot".into(),
-        format_version: SNAPSHOT_FORMAT_VERSION,
+        format_version: MIN_SNAPSHOT_FORMAT_VERSION,
         workspace: SnapshotWorkspace {
             name: "Benchmark Workspace".into(),
             workspace_format_version: 1,
@@ -105,6 +105,7 @@ pub fn generate_benchmark_snapshot(node_count: usize, seed: u64) -> Snapshot {
         nodes,
         revisions: Vec::new(),
         references,
+        assets: Vec::new(),
     }
 }
 

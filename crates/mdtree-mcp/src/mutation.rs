@@ -544,6 +544,8 @@ impl From<&mdtree_sqlite::StoreError> for MutationErrorDetail {
             }
             mdtree_sqlite::StoreError::Sqlite(_) => ("storage", None, None, None),
             mdtree_sqlite::StoreError::Json(_) => ("serialization", None, None, None),
+            mdtree_sqlite::StoreError::Asset(_) => ("invalid_asset", None, None, None),
+            mdtree_sqlite::StoreError::AssetExists(_) => ("asset_exists", None, None, None),
         };
         Self {
             code: code.into(),
