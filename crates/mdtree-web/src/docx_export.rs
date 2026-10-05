@@ -7,7 +7,8 @@
 //! document becomes a table-of-contents layout: the root's own content on
 //! page one, the table of contents on its own page, and every first-level
 //! child starting on a new page. The root's `toc-title` metadata, when set,
-//! replaces the default table-of-contents heading, and descendants with
+//! replaces the default table-of-contents heading, its `fonts` metadata
+//! overrides fonts per role (see `docx_fonts`), and descendants with
 //! `docx-exclude` metadata are left out together with their subtrees.
 
 use std::fmt::Write as _;
@@ -15,6 +16,8 @@ use std::fmt::Write as _;
 use mdtree_core::{NodeId, NodeMetadata};
 use mdtree_sqlite::{NodeDepth, SqliteStore, StoreError};
 use serde_json::Value;
+
+use crate::docx_fonts::{CharWidths, Fonts};
 
 /// A generated Word document and how many nodes it contains.
 #[derive(Clone, Debug)]
@@ -65,6 +68,8 @@ pub(crate) struct ExportNode {
     /// The node's `toc-title` metadata: the table of contents' heading when
     /// this node is the export root.
     pub(crate) toc_title: Option<Box<str>>,
+    /// The export root's `fonts` metadata; `None` on every other node.
+    pub(crate) fonts: Option<Fonts>,
 }
 
 /// Longest accepted `toc-title`, in characters.
@@ -92,6 +97,7 @@ pub(crate) fn export_nodes(subtree: Vec<NodeDepth>) -> Vec<ExportNode> {
                 markdown: fields.markdown_content.clone().into_boxed_str(),
                 toc_depth: toc_depth(extension(metadata, "toc-depth")),
                 toc_title: toc_title(extension(metadata, "toc-title")),
+                fonts: (entry.depth == 0).then(|| Fonts::parse(extension(metadata, "fonts"))),
             })
         })
         .collect()
@@ -160,6 +166,11 @@ const DEFAULT_TOC_TITLE: &str = "Table of contents";
 #[must_use]
 pub(crate) fn build_docx(nodes: &[ExportNode]) -> Vec<u8> {
     let title = nodes.first().map_or("", |node| &*node.title);
+    let fonts = nodes
+        .first()
+        .and_then(|root| root.fonts.clone())
+        .unwrap_or_default();
+    let char_widths = fonts.char_widths();
     // Depth zero is the root (Heading1), so at most eight levels below it
     // still have a Word outline heading of their own.
     let toc_depth = nodes
@@ -178,7 +189,11 @@ pub(crate) fn build_docx(nodes: &[ExportNode]) -> Vec<u8> {
             toc_depth.is_some() && node.depth == 1,
             in_toc.then_some(index),
         );
-        render_markdown(&mut body, strip_title_heading(&node.markdown, &node.title));
+        render_markdown(
+            &mut body,
+            strip_title_heading(&node.markdown, &node.title),
+            char_widths,
+        );
         if let (0, Some(depth)) = (index, toc_depth) {
             let title = node.toc_title.as_deref().unwrap_or(DEFAULT_TOC_TITLE);
             table_of_contents(&mut body, nodes, depth, title);
@@ -208,7 +223,7 @@ pub(crate) fn build_docx(nodes: &[ExportNode]) -> Vec<u8> {
         "word/_rels/document.xml.rels",
         DOCUMENT_RELATIONSHIPS.as_bytes(),
     );
-    archive.add("word/styles.xml", styles().as_bytes());
+    archive.add("word/styles.xml", styles(&fonts).as_bytes());
     archive.add("word/settings.xml", SETTINGS.as_bytes());
     archive.add("word/footer1.xml", FOOTER.as_bytes());
     archive.add("word/document.xml", document.as_bytes());
@@ -324,7 +339,7 @@ fn plain(text: &str) -> Run {
     }
 }
 
-fn render_markdown(body: &mut String, markdown: &str) {
+fn render_markdown(body: &mut String, markdown: &str, char_widths: CharWidths) {
     let mut pending: Vec<&str> = Vec::new();
     let mut table: Vec<&str> = Vec::new();
     let mut in_code = false;
@@ -335,7 +350,7 @@ fn render_markdown(body: &mut String, markdown: &str) {
             table.push(trimmed);
             continue;
         }
-        flush_table(body, &mut table);
+        flush_table(body, &mut table, char_widths);
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             flush_paragraph(body, &mut pending);
             in_code = !in_code;
@@ -369,7 +384,7 @@ fn render_markdown(body: &mut String, markdown: &str) {
         }
     }
     flush_paragraph(body, &mut pending);
-    flush_table(body, &mut table);
+    flush_table(body, &mut table, char_widths);
 }
 
 /// Word table width for an A4 page with 2.54 cm margins, in twentieths of a point.
@@ -384,7 +399,7 @@ const TABLE_BORDERS: &str = "<w:tblBorders><w:top w:val=\"nil\"/><w:left w:val=\
 /// Renders consecutive `|`-delimited lines as a Word table. A second-line
 /// delimiter row (`|---|:--:|`) marks the first row as a bold, repeating
 /// header and sets column alignment; without one every row is body text.
-fn flush_table(body: &mut String, lines: &mut Vec<&str>) {
+fn flush_table(body: &mut String, lines: &mut Vec<&str>, char_widths: CharWidths) {
     if lines.is_empty() {
         return;
     }
@@ -410,7 +425,7 @@ fn flush_table(body: &mut String, lines: &mut Vec<&str>) {
     if columns == 0 {
         return;
     }
-    let column_widths = column_widths(&rows, columns);
+    let column_widths = column_widths(&rows, columns, char_widths);
 
     let _ = write!(
         body,
@@ -463,7 +478,7 @@ const CELL_PADDING_TWIPS: usize = 170;
 /// longest unbreakable word, then the remaining page width is shared in
 /// proportion to how much more each column's longest cell needs. When even
 /// the words do not fit, the minimums are scaled down together.
-fn column_widths(rows: &[Vec<String>], columns: usize) -> Vec<usize> {
+fn column_widths(rows: &[Vec<String>], columns: usize, char_widths: CharWidths) -> Vec<usize> {
     let to_twips = |width: usize| width * TWIPS_PER_WIDTH_UNIT + CELL_PADDING_TWIPS;
     let cells = |column: usize| rows.iter().filter_map(move |row| row.get(column));
     let minimums: Vec<usize> = (0..columns)
@@ -471,7 +486,7 @@ fn column_widths(rows: &[Vec<String>], columns: usize) -> Vec<usize> {
             to_twips(
                 cells(column)
                     .flat_map(|cell| cell.split_whitespace())
-                    .map(display_width)
+                    .map(|word| display_width(word, char_widths))
                     .max()
                     .unwrap_or(0)
                     .max(36),
@@ -482,7 +497,7 @@ fn column_widths(rows: &[Vec<String>], columns: usize) -> Vec<usize> {
         .map(|column| {
             to_twips(
                 cells(column)
-                    .map(|cell| display_width(cell))
+                    .map(|cell| display_width(cell, char_widths))
                     .max()
                     .unwrap_or(0),
             )
@@ -530,18 +545,23 @@ fn capped_widths(minimums: &[usize]) -> Vec<usize> {
     minimums.iter().map(|width| (*width).min(cap)).collect()
 }
 
-/// Estimated rendered width in units of ten twips: about 120 twips per 11 pt
-/// proportional character (allowing for bold and substitute fonts) and 130
-/// per 10 pt monospace code character (substitute monospace fonts are
-/// wider than Consolas). Markdown markers are not rendered.
-fn display_width(cell: &str) -> usize {
+/// Estimated rendered width in units of ten twips, from per-character
+/// estimates for proportional text and monospace code (see `CharWidths`).
+/// Markdown markers are not rendered.
+fn display_width(cell: &str, char_widths: CharWidths) -> usize {
     let mut width = 0;
     let mut in_code = false;
     for character in cell.chars() {
         match character {
             '`' => in_code = !in_code,
             '*' | '_' if !in_code => {}
-            _ => width += if in_code { 13 } else { 12 },
+            _ => {
+                width += if in_code {
+                    char_widths.code
+                } else {
+                    char_widths.text
+                };
+            }
         }
     }
     width
@@ -780,21 +800,17 @@ fn paragraph_with(body: &mut String, style: Option<&str>, alignment: Option<&str
         body.push_str("<w:r>");
         let style = run.style;
         if style.bold || style.italic || style.code || style.highlight {
-            // CT_RPr is an ordered sequence: fonts, bold, italic, size, shading.
+            // CT_RPr is an ordered sequence: style, bold, italic, shading.
+            // Inline code takes its font from the `CodeChar` style.
             body.push_str("<w:rPr>");
             if style.code {
-                body.push_str(
-                    "<w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:cs=\"Consolas\"/>",
-                );
+                body.push_str("<w:rStyle w:val=\"CodeChar\"/>");
             }
             if style.bold {
                 body.push_str("<w:b/>");
             }
             if style.italic {
                 body.push_str("<w:i/>");
-            }
-            if style.code {
-                body.push_str("<w:sz w:val=\"20\"/><w:szCs w:val=\"20\"/>");
             }
             if style.highlight {
                 let _ = write!(
@@ -812,7 +828,7 @@ fn paragraph_with(body: &mut String, style: Option<&str>, alignment: Option<&str
 }
 
 /// XML-escapes text and drops characters XML 1.0 cannot represent.
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
         match character {
@@ -868,12 +884,13 @@ const SETTINGS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"ye
 <w:updateFields w:val=\"true\"/><w:defaultTabStop w:val=\"708\"/><w:characterSpacingControl w:val=\"doNotCompress\"/>\
 </w:settings>";
 
-fn styles() -> String {
-    let mut styles = String::from(
+/// Word styles for every paragraph and run kind the export writes, with run
+/// properties taken from the export root's `fonts` (or the defaults).
+fn styles(fonts: &Fonts) -> String {
+    let mut styles = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
          <w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
-         <w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"Calibri\" w:hAnsi=\"Calibri\" w:cs=\"Calibri\" w:eastAsia=\"Calibri\"/>\
-         <w:sz w:val=\"22\"/><w:szCs w:val=\"22\"/><w:lang w:val=\"en-US\"/></w:rPr></w:rPrDefault>\
+         <w:docDefaults><w:rPrDefault>{body}</w:rPrDefault>\
          <w:pPrDefault><w:pPr><w:spacing w:after=\"120\" w:line=\"264\" w:lineRule=\"auto\"/></w:pPr></w:pPrDefault></w:docDefaults>\
          <w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/><w:qFormat/></w:style>\
          <w:style w:type=\"paragraph\" w:styleId=\"ContentHeading\"><w:name w:val=\"Content Heading\"/><w:basedOn w:val=\"Normal\"/>\
@@ -887,19 +904,28 @@ fn styles() -> String {
          <w:insideH w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"E5E7EB\"/><w:insideV w:val=\"nil\"/></w:tblBorders>\
          <w:tblCellMar><w:top w:w=\"110\" w:type=\"dxa\"/><w:left w:w=\"0\" w:type=\"dxa\"/><w:bottom w:w=\"110\" w:type=\"dxa\"/><w:right w:w=\"170\" w:type=\"dxa\"/></w:tblCellMar></w:tblPr></w:style>\
          <w:style w:type=\"paragraph\" w:styleId=\"Footer\"><w:name w:val=\"footer\"/><w:basedOn w:val=\"Normal\"/>\
-         <w:pPr><w:spacing w:after=\"0\"/></w:pPr><w:rPr><w:color w:val=\"6B7280\"/><w:sz w:val=\"18\"/><w:szCs w:val=\"18\"/></w:rPr></w:style>\
+         <w:pPr><w:spacing w:after=\"0\"/></w:pPr>{footer}</w:style>\
          <w:style w:type=\"paragraph\" w:styleId=\"TableText\"><w:name w:val=\"Table Text\"/><w:basedOn w:val=\"Normal\"/>\
-         <w:pPr><w:spacing w:after=\"0\"/></w:pPr></w:style>\
+         <w:pPr><w:spacing w:after=\"0\"/></w:pPr>{table}</w:style>\
          <w:style w:type=\"paragraph\" w:styleId=\"TableSpacer\"><w:name w:val=\"Table Spacer\"/><w:basedOn w:val=\"Normal\"/>\
          <w:pPr><w:spacing w:after=\"120\" w:line=\"120\" w:lineRule=\"exact\"/></w:pPr><w:rPr><w:sz w:val=\"4\"/></w:rPr></w:style>\
          <w:style w:type=\"paragraph\" w:styleId=\"CodeBlock\"><w:name w:val=\"Code Block\"/><w:basedOn w:val=\"Normal\"/>\
          <w:pPr><w:spacing w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/><w:ind w:left=\"284\"/></w:pPr>\
-         <w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:cs=\"Consolas\"/><w:sz w:val=\"18\"/><w:szCs w:val=\"18\"/></w:rPr></w:style>",
+         {code_block}</w:style>\
+         <w:style w:type=\"character\" w:styleId=\"CodeChar\"><w:name w:val=\"Code Char\"/>{inline_code}</w:style>",
+        body = fonts.body().style_rpr(true, "<w:lang w:val=\"en-US\"/>"),
+        footer = fonts.footer().style_rpr(false, ""),
+        table = fonts.table().style_rpr(false, ""),
+        code_block = fonts.code_block().style_rpr(false, ""),
+        inline_code = fonts.inline_code().style_rpr(false, ""),
     );
-    styles.push_str(
+    // The table of contents title is styled like the root's own heading.
+    let _ = write!(
+        styles,
         "<w:style w:type=\"paragraph\" w:styleId=\"TOCHeading\"><w:name w:val=\"TOC Heading\"/>\
          <w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:pPr><w:keepNext/><w:spacing w:before=\"360\" w:after=\"240\"/></w:pPr>\
-         <w:rPr><w:b/><w:bCs/><w:color w:val=\"1F3864\"/><w:sz w:val=\"36\"/><w:szCs w:val=\"36\"/></w:rPr></w:style>",
+         {}</w:style>",
+        fonts.heading(1).style_rpr(false, "")
     );
     for level in 1..=MAX_HEADING_LEVEL {
         // Entries for depth one (Heading2/TOC2) sit flush left.
@@ -909,23 +935,19 @@ fn styles() -> String {
             "<w:style w:type=\"paragraph\" w:styleId=\"TOC{level}\"><w:name w:val=\"toc {level}\"/>\
              <w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:uiPriority w:val=\"39\"/>\
              <w:pPr><w:spacing w:after=\"60\"/><w:ind w:left=\"{indent}\"/></w:pPr>{}</w:style>",
-            if level == 2 {
-                "<w:rPr><w:b/><w:bCs/></w:rPr>"
-            } else {
-                ""
-            }
+            fonts.toc(level as usize).style_rpr(false, "")
         );
     }
     for level in 1..=MAX_HEADING_LEVEL {
-        let size = 36_u32.saturating_sub(level.saturating_sub(1) * 3).max(22);
         let _ = write!(
             styles,
             "<w:style w:type=\"paragraph\" w:styleId=\"Heading{level}\"><w:name w:val=\"heading {level}\"/>\
              <w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:qFormat/>\
              <w:pPr><w:keepNext/><w:spacing w:before=\"{before}\" w:after=\"120\"/><w:outlineLvl w:val=\"{outline}\"/></w:pPr>\
-             <w:rPr><w:b/><w:bCs/><w:color w:val=\"1F3864\"/><w:sz w:val=\"{size}\"/><w:szCs w:val=\"{size}\"/></w:rPr></w:style>",
+             {rpr}</w:style>",
             before = if level == 1 { 360 } else { 240 },
             outline = level - 1,
+            rpr = fonts.heading(level as usize).style_rpr(false, ""),
         );
     }
     styles.push_str("</w:styles>");
@@ -1040,6 +1062,7 @@ mod tests {
         build_docx, column_widths, escape, inline_runs, render_markdown, strip_title_heading,
         table_cells, TABLE_WIDTH_TWIPS,
     };
+    use crate::docx_fonts::{CharWidths, Fonts};
 
     fn node(depth: u32, title: &str, markdown: &str) -> ExportNode {
         ExportNode {
@@ -1048,6 +1071,7 @@ mod tests {
             markdown: markdown.into(),
             toc_depth: None,
             toc_title: None,
+            fonts: None,
         }
     }
 
@@ -1154,6 +1178,7 @@ mod tests {
         render_markdown(
             &mut body,
             "Intro\n| Lauks | Vērtība |\n|---|--:|\n| Adrese | Rīga |\n| E-pasts | *precizējams* |\nAfter",
+            CharWidths::DEFAULT,
         );
         assert_eq!(body.matches("<w:tbl>").count(), 1);
         assert_eq!(body.matches("<w:tr>").count(), 3);
@@ -1172,7 +1197,7 @@ mod tests {
             vec!["Nr.".to_owned(), "Apraksts".to_owned()],
             vec!["1".to_owned(), "garš ".repeat(40)],
         ];
-        let widths = column_widths(&rows, 2);
+        let widths = column_widths(&rows, 2, CharWidths::DEFAULT);
         assert_eq!(widths.iter().sum::<usize>(), TABLE_WIDTH_TWIPS);
         assert!(widths[0] < widths[1] / 5);
     }
@@ -1184,7 +1209,7 @@ mod tests {
             "1/1".to_owned(),
             "`".to_owned() + &"y".repeat(80) + "`",
         ]];
-        let widths = column_widths(&rows, 3);
+        let widths = column_widths(&rows, 3, CharWidths::DEFAULT);
         assert!(widths.iter().sum::<usize>() <= TABLE_WIDTH_TWIPS);
         assert_eq!(widths[1], 36 * 10 + 170);
         assert_eq!(widths[0], widths[2]);
@@ -1198,19 +1223,23 @@ mod tests {
     }
 
     fn document_xml(nodes: &[ExportNode]) -> String {
+        package_part(nodes, "word/document.xml")
+    }
+
+    fn package_part(nodes: &[ExportNode], part: &str) -> String {
         let bytes = build_docx(nodes);
-        // Entries are stored, so word/document.xml follows its local header.
-        let name = b"word/document.xml";
-        // The name also appears inside [Content_Types].xml, so match only a
+        // Entries are stored, so each part follows its local header.
+        let name = part.as_bytes();
+        // A name can also appear inside [Content_Types].xml, so match only a
         // local file header (signature `PK\x03\x04`, name 30 bytes later).
         let header = (0..bytes.len() - 30 - name.len())
             .find(|&at| {
                 bytes[at..at + 4] == *b"PK\x03\x04" && bytes[at + 30..at + 30 + name.len()] == *name
             })
-            .expect("document entry");
+            .expect("package part");
         let size = u32::from_le_bytes(bytes[header + 18..header + 22].try_into().unwrap()) as usize;
         let start = header + 30 + name.len();
-        String::from_utf8(bytes[start..start + size].to_vec()).expect("utf-8 document")
+        String::from_utf8(bytes[start..start + size].to_vec()).expect("utf-8 part")
     }
 
     #[test]
@@ -1248,6 +1277,43 @@ mod tests {
         ]);
         assert!(xml.contains(">Saturs &amp; &lt;pielikumi&gt;<"));
         assert!(!xml.contains("Table of contents"));
+    }
+
+    #[test]
+    fn root_fonts_reach_the_styles_and_child_fonts_are_ignored() {
+        let fonts = serde_json::json!({
+            "body": {"family": "Arial"},
+            "headings": {"family": "Georgia"},
+            "code": {"family": "Courier New", "size": 9}
+        });
+        let styles = package_part(
+            &[
+                ExportNode {
+                    fonts: Some(Fonts::parse(Some(&fonts))),
+                    ..node(0, "Root", "Uses `code`")
+                },
+                ExportNode {
+                    fonts: Some(Fonts::parse(Some(
+                        &serde_json::json!({"body": {"family": "Comic Sans MS"}}),
+                    ))),
+                    ..node(1, "Child", "x")
+                },
+            ],
+            "word/styles.xml",
+        );
+        assert!(styles.contains("<w:rPrDefault><w:rPr><w:rFonts w:ascii=\"Arial\""));
+        assert!(styles.contains("w:styleId=\"Heading2\"><w:name w:val=\"heading 2\"/>"));
+        assert_eq!(
+            styles.matches("w:ascii=\"Georgia\"").count(),
+            10,
+            "nine headings and the TOC title"
+        );
+        assert!(styles.contains("w:styleId=\"CodeChar\"><w:name w:val=\"Code Char\"/><w:rPr><w:rFonts w:ascii=\"Courier New\""));
+        assert!(!styles.contains("Comic Sans MS"));
+        let document = document_xml(&[node(0, "Root", "Uses `code`")]);
+        assert!(document.contains(
+            "<w:rPr><w:rStyle w:val=\"CodeChar\"/></w:rPr><w:t xml:space=\"preserve\">code<"
+        ));
     }
 
     #[test]

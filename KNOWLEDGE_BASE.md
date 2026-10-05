@@ -419,6 +419,30 @@ numbered in the footer. Metadata on the export root controls the layout:
   the root starts on a new page.
 - `"toc-title": "…"` — the table of contents heading (default
   "Table of contents").
+- `"fonts": {…}` — font overrides per role, for example:
+
+  ```json
+  "fonts": {
+    "body":      { "family": "Arial", "size": 11, "color": "222222" },
+    "headings":  { "family": "Georgia", "color": "1F3864" },
+    "heading-2": { "size": 16, "italic": true },
+    "code":      { "family": "Courier New", "size": 9.5 },
+    "table":     { "size": 10 },
+    "toc":       { "size": 11 },
+    "footer":    { "size": 8, "color": "888888" }
+  }
+  ```
+
+  Roles: `body` (all text, inherited by every other role), `headings` (node
+  headings and the table of contents title), `heading-1` … `heading-9` (one
+  level; 1 is the export root), `code` (inline code and code blocks; stays
+  monospace unless `family` is set), `table`, `toc` (entries) and `footer`
+  (page number). Properties, all optional: `family`, `size` (points, halves
+  allowed, 4–96), `color` (`RRGGBB`, optional `#`), `bold`, `italic`. A role
+  sets only what it changes; invalid values and unknown roles are ignored.
+  Fonts are not embedded, so readers without a font see a substitute. Each
+  role is a Word style (`Normal`, `Heading1`–`9`, `CodeBlock`/`CodeChar`,
+  `TableText`, `TOC1`–`9`, `Footer`), so it can be restyled in Word later.
 
 Any descendant with `"docx-exclude": true` is omitted together with its
 subtree; the selected root itself is always exported.

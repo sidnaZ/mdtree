@@ -26,6 +26,7 @@ mod assets;
 mod change_hub;
 mod commands;
 mod docx_export;
+mod docx_fonts;
 mod lifecycle;
 mod markdown;
 mod search;
