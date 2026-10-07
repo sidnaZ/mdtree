@@ -428,6 +428,17 @@
     @apply rounded-sm bg-yellow-200 px-0.5 text-slate-900 dark:bg-yellow-400/30 dark:text-yellow-100;
   }
 
+  /* Captioned figures (a lone titled image, see with_figures in
+     src/markdown.rs), centred like DOCX figures, in both the viewer and the
+     editor preview. */
+  figure img {
+    @apply mx-auto;
+  }
+
+  figcaption {
+    @apply mt-2 text-center text-sm italic text-slate-500 dark:text-slate-400;
+  }
+
   .dark .editor-toolbar {
     @apply border-slate-700 bg-slate-900;
   }

@@ -480,7 +480,9 @@ file names fold diacritics (`Ekrāna attēls.png` → `Ekrana-attels.png`).
 asset that does not exist, and `asset_hash` for corrupt stored bytes.
 
 - **Web UI:** the viewer serves assets from `/api/{workspace}/asset/{name}`
-  (`nosniff`, no-script CSP). In the editor, paste or drop an image, or use the
+  (`nosniff`, no-script CSP). An image alone in its paragraph with a title is
+  shown as a centred figure with the title as its caption, in the viewer and
+  the editor preview alike. In the editor, paste or drop an image, or use the
   upload toolbar button; it is stored as an asset (an identical image is
   reused, a different one with the same name gets `-2`, `-3`, …) and inserted
   at the cursor, as its own paragraph when the cursor is at either end of a

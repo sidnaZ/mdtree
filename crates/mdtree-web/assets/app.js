@@ -2963,8 +2963,9 @@ async function uploadEditorImage(editor, file) {
   cm.focus();
 }
 
-// Points `asset:<name>[?width=N%]` images at the workspace's asset route,
-// mirroring the server renderer (markdown.rs `with_asset_images`).
+// Points `asset:<name>[?width=N%]` images at the workspace's asset route and
+// captions lone titled images, mirroring the server renderer (markdown.rs
+// `with_asset_images` and `with_figures`).
 function resolveAssetImages(html) {
   const template = document.createElement("template");
   template.innerHTML = html;
@@ -2979,6 +2980,20 @@ function resolveAssetImages(html) {
     if (width && Number(width[1]) >= 1 && Number(width[1]) <= 100) {
       image.setAttribute("width", `${width[1]}%`);
     }
+  }
+  // A paragraph holding nothing but one titled image becomes a captioned
+  // figure, mirroring the server renderer (markdown.rs `with_figures`).
+  for (const image of template.content.querySelectorAll("p > img[title]")) {
+    const paragraph = image.parentElement;
+    const caption = image.getAttribute("title").trim();
+    if (!caption || paragraph.childElementCount !== 1 || paragraph.textContent.trim()) {
+      continue;
+    }
+    const figure = document.createElement("figure");
+    const figcaption = document.createElement("figcaption");
+    figcaption.textContent = caption;
+    figure.append(image, figcaption);
+    paragraph.replaceWith(figure);
   }
   return template.innerHTML;
 }

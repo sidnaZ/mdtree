@@ -25,7 +25,10 @@ pub(crate) fn render_sanitized_html(markdown: &str, asset_base: &str) -> String 
     let mut unsafe_html = String::new();
     html::push_html(
         &mut unsafe_html,
-        with_highlights(with_asset_images(parser, asset_base)),
+        with_highlights(with_asset_images(
+            with_figures(parser).into_iter(),
+            asset_base,
+        )),
     );
 
     ammonia::Builder::default()
@@ -87,6 +90,51 @@ fn with_asset_images<'a>(
         _ if active.is_some() => None,
         other => Some(other),
     })
+}
+
+/// Turns each paragraph holding nothing but one titled image into a
+/// `<figure>` with the title as its `<figcaption>`, as the DOCX export
+/// renders such an image (a centred figure with a caption below).
+fn with_figures<'a>(events: impl Iterator<Item = Event<'a>>) -> Vec<Event<'a>> {
+    let mut events: Vec<_> = events.collect();
+    let mut index = 0;
+    while index < events.len() {
+        if let Some((end, caption)) = lone_titled_image(&events[index..]) {
+            events[index] = Event::Html("<figure>".into());
+            events[index + end] = Event::Html(
+                format!(
+                    "<figcaption>{}</figcaption></figure>",
+                    escape_attribute(&caption)
+                )
+                .into(),
+            );
+            index += end;
+        }
+        index += 1;
+    }
+    events
+}
+
+/// When `events` opens a paragraph consisting of one image with a non-blank
+/// title: the offset of the paragraph's end and the trimmed title.
+fn lone_titled_image(events: &[Event<'_>]) -> Option<(usize, String)> {
+    let [Event::Start(Tag::Paragraph), Event::Start(Tag::Image { title, .. }), rest @ ..] = events
+    else {
+        return None;
+    };
+    let caption = title.trim();
+    if caption.is_empty() {
+        return None;
+    }
+    let image_end = rest.iter().position(|event| {
+        matches!(
+            event,
+            Event::Start(Tag::Image { .. }) | Event::End(TagEnd::Image)
+        )
+    })?;
+    let closes = matches!(rest[image_end], Event::End(TagEnd::Image))
+        && matches!(rest.get(image_end + 1), Some(Event::End(TagEnd::Paragraph)));
+    closes.then(|| (image_end + 3, caption.to_owned()))
 }
 
 fn escape_attribute(value: &str) -> String {
@@ -204,6 +252,30 @@ mod tests {
             other.contains("src=\"https://example.com/r.png\""),
             "{other}"
         );
+    }
+
+    #[test]
+    fn a_titled_image_alone_in_its_paragraph_becomes_a_captioned_figure() {
+        let html = render("Intro\n\n![Kopējā arhitektūra](asset:nis.png \"Attēls 1 <Kopējā>\")\n");
+        assert!(
+            html.contains("<figure><img src=\"/api/0/asset/nis.png\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("<figcaption>Attēls 1 &lt;Kopējā&gt;</figcaption></figure>"),
+            "{html}"
+        );
+        assert!(!html.contains("<p><figure>"), "{html}");
+
+        for markdown in [
+            "![untitled](asset:nis.png)",
+            "![blank](asset:nis.png \"  \")",
+            "Text ![inline](asset:nis.png \"Title\") text",
+            "![a](asset:a.png \"A\") ![b](asset:b.png \"B\")",
+        ] {
+            let html = render(markdown);
+            assert!(!html.contains("<figure>"), "{markdown}: {html}");
+        }
     }
 
     #[test]
